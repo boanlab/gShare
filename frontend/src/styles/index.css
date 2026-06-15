@@ -1,0 +1,204 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* The theme, expressed as CSS variables, in light and dark. */
+:root {
+  --bg: #f7f8fa;
+  --surface: #ffffff;
+  --surface-2: #f4f5f7;
+  --border: #e5e7eb;
+  --text: #111827;
+  /* Foregrounds are chosen for WCAG AA against their own soft background, not against white. */
+  --muted: #5a6270;
+  --primary: #4f46e5;
+  --primary-soft: #eef2ff;
+  --gpu: #4f46e5;
+  --gpu-soft: #eef2ff;
+  --free: #067a53;
+  --free-soft: #e9f5ef;
+  --warn: #8a5600;
+  --warn-soft: #fbf3e6;
+  --danger: #b91c1c;
+  --danger-soft: #fceced;
+  --ok: #067a53;
+  --shadow: 0 1px 2px rgba(17, 24, 39, 0.04), 0 1px 3px rgba(17, 24, 39, 0.06);
+  --radius: 12px;
+}
+
+html[data-theme='dark'] {
+  --bg: #0f1218;
+  --surface: #171a21;
+  --surface-2: #1e222b;
+  --border: #2b303b;
+  --text: #e7e9ee;
+  --muted: #9aa1ad;
+  --primary: #7c8aff;
+  --primary-soft: #23263a;
+  --gpu: #7c8aff;
+  --gpu-soft: #23263a;
+  --free: #34c08a;
+  --free-soft: #11251c;
+  --warn: #d89636;
+  --warn-soft: #2a2210;
+  --danger: #e06666;
+  --danger-soft: #2a1616;
+  --ok: #34c08a;
+  --shadow: 0 1px 2px rgba(0, 0, 0, 0.25), 0 6px 18px rgba(0, 0, 0, 0.3);
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font-size: 14px;
+  line-height: 1.5;
+  font-family: ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* Keyboard focus ring, on every control. */
+:focus-visible {
+  outline: 2px solid var(--primary);
+  outline-offset: 2px;
+  border-radius: 4px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+
+/* Console shell. Below `md` the sidebar leaves the grid and becomes an overlay drawer. */
+.gs-shell {
+  grid-template-columns: auto 1fr;
+  grid-template-rows: 56px 1fr;
+  grid-template-areas:
+    'brand top'
+    'main main';
+}
+
+.gs-shell > .gs-brand { grid-area: brand; }
+.gs-shell > .gs-topbar { grid-area: top; }
+.gs-shell > .gs-sidenav { grid-area: nav; }
+.gs-shell > .gs-main { grid-area: main; }
+
+@media (min-width: 768px) {
+  .gs-shell {
+    grid-template-columns: 240px 1fr;
+    grid-template-areas:
+      'brand top'
+      'nav main';
+  }
+}
+
+@layer components {
+  /* Assistive-technology only; the skip link becomes visible on focus. */
+  .gs-sr-only {
+    @apply absolute w-px h-px p-0 -m-px overflow-hidden whitespace-nowrap border-0;
+    clip: rect(0, 0, 0, 0);
+  }
+  .gs-skip-link {
+    @apply gs-sr-only;
+  }
+  .gs-skip-link:focus {
+    @apply not-sr-only fixed top-2 left-2 z-50 w-auto h-auto m-0 p-3 rounded-[9px] bg-primary text-white font-bold shadow-card;
+    clip: auto;
+  }
+  .gs-card {
+    @apply bg-surface border border-border rounded-card p-[18px] shadow-card;
+  }
+  .gs-btn {
+    @apply inline-flex items-center gap-1.5 px-3.5 py-2 rounded-[9px] border border-border bg-surface-2 text-text font-bold text-[13px] cursor-pointer transition whitespace-nowrap shrink-0;
+  }
+  .gs-btn-primary {
+    @apply bg-primary border-primary text-white;
+  }
+  .gs-btn-sm {
+    @apply px-2.5 py-1 text-[12px] rounded-[7px];
+  }
+  .gs-btn-danger {
+    @apply border-danger text-danger;
+  }
+  .gs-input {
+    @apply px-3 py-2 rounded-[9px] border border-border bg-surface text-text text-[13px] outline-none focus:border-primary;
+  }
+  /* Touch sizing. Width is matched as well as pointer, which emulated browsers report unreliably. */
+  @media (pointer: coarse), (max-width: 767px) {
+    .gs-btn,
+    .gs-input,
+    input[type='checkbox'],
+    input[type='radio'],
+    select {
+      min-height: 44px;
+    }
+    .gs-btn-sm {
+      @apply px-3 py-2 text-[13px];
+      min-height: 44px;
+    }
+    input[type='checkbox'],
+    input[type='radio'] {
+      min-width: 24px;
+      width: 24px;
+      height: 24px;
+    }
+  }
+  .gs-pill {
+    @apply inline-flex items-center px-2 py-0.5 rounded-full text-[11.5px] font-bold whitespace-nowrap;
+  }
+  /* Dashboard KPI tiles and progress bars */
+  .gs-stat .gs-label { @apply text-muted text-[12px] font-semibold; }
+  .gs-stat .gs-value { @apply text-[26px] font-extrabold tracking-tight mt-1.5 mb-1; }
+  .gs-stat .gs-value small { @apply text-[13px] text-muted font-semibold; }
+  .gs-bar { @apply h-2 rounded-md bg-surface-2 overflow-hidden mt-1.5; }
+  .gs-bar > i { @apply block h-full rounded-md bg-primary; }
+  .gs-bar.gpu > i { @apply bg-primary; }
+  .gs-bar.warn > i { background: var(--warn); }
+  .gs-bar.free > i { background: var(--free); }
+  .gs-qrow { @apply flex items-center gap-3 py-2.5 border-b border-border last:border-b-0; }
+  .gs-qrow .gs-qn { @apply w-[120px] text-muted font-semibold text-[12.5px]; }
+  .gs-qrow .gs-bar { @apply flex-1 mt-0; }
+  .gs-qrow .gs-qv { @apply w-[120px] text-right font-bold text-[12.5px]; }
+}
+
+/* Phone floor: 12px text, 44px targets. Last in the sheet and specificity-raised to beat the
+   utilities it corrects. */
+@media (max-width: 767px) {
+  html .text-\[10px\],
+  html .text-\[10\.5px\],
+  html .text-\[11px\],
+  html .text-\[11\.5px\],
+  html .gs-pill {
+    font-size: 12px;
+  }
+
+  html .gs-btn,
+  html .gs-btn-sm,
+  html button:not(.gs-sr-only),
+  html .gs-input,
+  html select {
+    min-height: 44px;
+  }
+
+  html [data-copy] {
+    min-width: 44px;
+    justify-content: center;
+  }
+
+  html .gs-btn-sm {
+    padding: 0.5rem 0.75rem;
+    font-size: 13px;
+  }
+}

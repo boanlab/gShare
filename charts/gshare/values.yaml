@@ -1,0 +1,178 @@
+# GShare Helm values.
+# Canonical image registry host = registry.gshare.internal.
+
+# ── Global ──
+global:
+  # Canonical registry (Harbor). Must match the cosign-verify allowlist.
+  imageRegistry: registry.gshare.internal
+  imagePullSecrets:
+    - name: gshare-registry        # filled by external-secrets (deploy/secrets)
+  # Session / control-plane namespaces
+  namespaces:
+    system: gshare-system
+    sessions: gshare-sessions
+    infra: gshare-infra
+  # Domains — single console/session host. (internal JWKS URL is set separately via internalJwksUrl)
+  domains:
+    console: gshare.example.com        # user console + sessions (path-based /proxy/{cr}); replace with the real domain in prod
+
+# ── Namespace creation toggle (chart creates them vs. created externally) ──
+createNamespaces: true
+
+# ── Control-plane toggle ──
+# true (the default) deploys the control plane here too — api, worker, frontend, the data tier, and
+#   the secrets — as an all-in-one install.
+# false deploys only the data plane: the operator, CRDs, namespaces, RBAC, and optionally the
+#   webhook. The control plane then runs elsewhere (under Docker Compose, say) and this cluster is a
+#   remote GPU cluster it drives through a kubeconfig, with the operator calling back to
+#   operator.controlPlaneUrl. See deploy/values/dataplane.yaml and `make deploy-dataplane`.
+controlPlane:
+  enabled: true
+
+# ── Images ── (repository is joined with global.imageRegistry; see _helpers.tpl)
+images:
+  # api/worker run the same backend image (gshare-backend) with different commands.
+  api:
+    repository: gshare-backend
+    tag: "0.1.0"
+    pullPolicy: IfNotPresent
+  worker:
+    repository: gshare-backend
+    tag: "0.1.0"
+    pullPolicy: IfNotPresent
+  operator:
+    repository: gshare-operator
+    tag: "0.1.0"
+    pullPolicy: IfNotPresent
+  frontend:
+    repository: gshare-frontend
+    tag: "0.1.0"
+    pullPolicy: IfNotPresent
+
+# ── gshare-api (Python control plane: ID-issuing authority, JWKS publisher) ──
+api:
+  replicas: 2                          # at least 2 replicas
+  port: 8080                           # one uvicorn serves public (/api/v1) + internal (/internal, /.well-known)
+  resources:
+    requests: { cpu: "250m", memory: 512Mi }
+    limits: { cpu: "1", memory: 1Gi }
+
+# ── gshare-worker (Python batch: billing consume/settle, queue dequeue, idle reaper) ──
+worker:
+  replicas: 2
+  resources:
+    requests: { cpu: "250m", memory: 512Mi }
+    limits: { cpu: "1", memory: 1Gi }
+  # Credit-exhaustion grace window (sec) — graceful pause/yield if still unfunded after this. Empty
+  # uses the code default (600). Read by grace_enforcer (worker). (gpu-yield-lending)
+  gracePeriodSec: 600
+  # In-place yield resume-reservation TTL (sec) — a yielded session (host-RAM lossless hold) that
+  # refunds within this is reclaimed losslessly, else cold-demoted (card + priority released). Empty
+  # uses the code default (1800). Read by grace_enforcer (worker). (gpu-yield-lending)
+  yieldReservationTtlSec: 1800
+
+# ── gshare-operator (Go, per-cluster, leader-elected) ──
+operator:
+  replicas: 1                          # leader-elected
+  # --cluster-id. The cluster FK target for inventory/sessions, so it must match the backend-seeded
+  # LOCAL_CLUSTER_ID. '_' is allowed (the operator DNS-sanitizes the leader-lease name gshare-operator.<id>).
+  clusterId: clu_local
+  # internal-JWT secret name (key internal-jwt) for operator->control callback auth. With
+  # secrets.generate=true the chart Hook Job/CronJob create+rotate it; in prod external-secrets injects the same name/key.
+  internalJwtSecret: gshare-operator-internal-jwt
+  internalJwtTokenTtlSec: 604800       # issued-token TTL (7d); the CronJob re-signs daily, well within this.
+  # The operator is a token holder (no private key; verifies via JWKS). Routing/callbacks/namespaces
+  # are derived by the chart from global.* (operator-deployment.yaml).
+  internalJwksUrl: "https://api.gshare.internal/.well-known/gshare-internal-jwks.json"
+  # Base URL of an external control plane, for example http://10.0.0.10:8080. Left empty (the
+  # all-in-one case) the status callbacks and connect-verify point at the in-cluster api service.
+  # When set, both the operator callback (--sot-endpoint) and the session ingress forward-auth
+  # (--connect-verify-url) point here. Required when controlPlane.enabled is false.
+  # It must be reachable from both the operator pod and ingress-nginx.
+  controlPlaneUrl: ""
+  # Where the idle reaper gets per-GPU utilisation. Pick one; with neither set, idle GPU reclamation
+  # is disabled and only the max-runtime cap applies.
+  # 1. hamiMonitorUrl (recommended): HAMi's vGPU monitor, which stock HAMi already runs, so no extra
+  #    infrastructure is needed. It takes precedence over Prometheus.
+  #    For example http://hami-device-plugin-monitor.kube-system.svc:31992, which
+  #    deploy/values/incluster.yaml sets by default.
+  hamiMonitorUrl: ""
+  # 2. prometheusUrl: DCGM_FI_DEV_GPU_UTIL from Prometheus, when you already run a monitoring stack.
+  #    Deploy deploy/monitoring/dcgm-prometheus.yaml, then set
+  #    "http://prometheus.monitoring.svc:9090".
+  prometheusUrl: ""
+  # The lend-guard ValidatingWebhook enforces the borrow invariants at Kubernetes admission — one
+  # borrower per yielded card, and no borrowing of a card that is not yielded — as a second layer
+  # above the backend ledger. The operator issues its own self-signed serving certificate and injects
+  # the caBundle, so cert-manager is not required. failurePolicy is Ignore, because the ledger is the
+  # primary control.
+  webhook:
+    enabled: false
+  # Which borrow path to use. true selects the GShare-patched HAMi extender, which supports
+  # fractional and multiple borrowers with proper accounting; it requires `make hami-fork-image` and
+  # swapping the hami-scheduler image. false (the default, on stock HAMi) uses the device-plugin
+  # bypass, which can only borrow exclusively.
+  # Fractional borrowing also needs the backend's GSHARE_YIELD_FRACTIONAL_BORROW enabled.
+  hamiYieldExtender: false
+  # Full image reference for the lossless-pause and in-place-yield node agent. Left empty, the
+  # checkpointer is disabled: pause falls back to cold, and neither in-place yield nor graceful
+  # demotion is available. It requires the criu and cuda-checkpoint node labels, the gshare-infra
+  # namespace, and the gshare-lossless-agent service account.
+  # (See docs/paper/manuscript, §Implementation.)
+  losslessAgentImage: ""
+  resources:
+    requests: { cpu: "100m", memory: 128Mi }
+    limits: { cpu: "500m", memory: 256Mi }
+
+# ── gshare-frontend (SPA) ──
+# VITE_* build vars are set at image build time via frontend/.env, not at runtime (no effect in values).
+frontend:
+  replicas: 2
+  port: 80
+  resources:
+    requests: { cpu: "50m", memory: 64Mi }
+    limits: { cpu: "200m", memory: 128Mi }
+
+# ── Bootstrap super_admin (ensured on startup; password in the gshare-bootstrap-admin secret) ──
+bootstrapAdmin:
+  email: admin@example.com
+  password: change-me-please   # initial password (change forced on first login). Empty "" → random when secrets.generate.
+
+# ── All-in-one (in-cluster) local-cluster auto-registration ──
+# true → control plane ensures a Cluster row with the same ID as operator.clusterId (inventory FK
+# target). false in prod (external clusters registered explicitly via API). incluster.yaml sets true.
+bootstrapLocalCluster: false
+
+# ── Data layer ──
+# Default: external (prod: CNPG/external redis, connection info only). inCluster=true → the chart
+# deploys single-instance postgres/redis (dev/all-in-one); passwords then come from secrets.generate.
+postgres:
+  inCluster: false                      # true → chart deploys postgres Deployment+PVC+Service
+  image: postgres:16
+  storage: 5Gi
+  host: gshare-pg-rw.gshare-system.svc  # matches this service name when inCluster
+  port: 5432
+  database: gshare
+  credentialsSecret: gshare-pg-app      # uri (+password) keys — external-secrets or secrets.generate
+redis:
+  inCluster: false                      # true → chart deploys redis Deployment+Service
+  image: redis:7
+  host: gshare-redis.gshare-system.svc
+  port: 6379
+
+# ── Secret auto-generation (dev/all-in-one) ──
+# true → chart creates+keeps auth-token / jwt-signing (RS256) / bootstrap-admin (+ pg-app when inCluster).
+# false in prod (injected by external-secrets via Vault/KMS).
+secrets:
+  generate: false
+
+# ── Ingress (ingress-nginx) — HTTP only. TLS is terminated by an upstream reverse proxy (cert mgmt). ──
+ingress:
+  enabled: true
+  className: nginx
+  annotations: {}
+
+# ── ServiceAccount names (RBAC) ──
+serviceAccounts:
+  controller: gshare-controller        # shared by api/worker for session-CR writes
+  operator: gshare-operator            # in-cluster operator SA

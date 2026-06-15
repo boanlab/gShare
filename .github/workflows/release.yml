@@ -1,0 +1,75 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing tag to build the release from (e.g. v0.1.0)
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: GitHub release
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+          fetch-depth: 0
+
+      - uses: azure/setup-helm@v4
+        with:
+          version: v3.16.3
+
+      - name: Resolve version
+        id: version
+        run: |
+          tag="${{ inputs.tag || github.ref_name }}"
+          echo "tag=$tag"           >> "$GITHUB_OUTPUT"
+          echo "version=${tag#v}"   >> "$GITHUB_OUTPUT"
+
+      - name: Package chart and render an all-in-one manifest
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          mkdir -p dist
+          # Stamp the released version onto the chart so the artifact is self-describing.
+          helm package charts/gshare \
+            --version "$VERSION" --app-version "$VERSION" --destination dist
+          helm template gshare "dist/gshare-${VERSION}.tgz" \
+            -f deploy/values/dockerhub.yaml \
+            --set images.api.tag="$VERSION" \
+            --set images.worker.tag="$VERSION" \
+            --set images.operator.tag="$VERSION" \
+            --set images.frontend.tag="$VERSION" \
+            > "dist/gshare-${VERSION}.yaml"
+          (cd dist && sha256sum ./* > checksums.txt)
+
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.version.outputs.tag }}
+          generate_release_notes: true
+          files: dist/*
+          body: |
+            ## Container images
+
+            ```
+            docker.io/boanlab/gshare-backend:${{ steps.version.outputs.version }}
+            docker.io/boanlab/gshare-operator:${{ steps.version.outputs.version }}
+            docker.io/boanlab/gshare-frontend:${{ steps.version.outputs.version }}
+            ```
+
+            ## Install
+
+            ```bash
+            helm upgrade -i gshare \
+              https://github.com/boanlab/gShare/releases/download/${{ steps.version.outputs.tag }}/gshare-${{ steps.version.outputs.version }}.tgz \
+              -n gshare-system --create-namespace -f deploy/values/incluster.yaml
+            ```

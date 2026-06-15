@@ -1,0 +1,67 @@
+name: Bug report
+description: Something in GShare does not behave as documented.
+labels: [bug, needs-triage]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Security vulnerabilities do not belong here — follow [SECURITY.md](../../SECURITY.md) instead.
+
+  - type: dropdown
+    id: component
+    attributes:
+      label: Component
+      options:
+        - gshare-api (backend control plane)
+        - gshare-worker (billing / queue / reaper batch)
+        - gshare-operator (per-cluster Go controller)
+        - console (frontend SPA)
+        - Helm chart / deployment
+        - Documentation
+        - Not sure
+    validations:
+      required: true
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: What you observed, and what you expected instead.
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. Create a fractional session with 8 GB VRAM
+        2. Pause it from the console
+        3. Resume it — the session stays in `pending`
+    validations:
+      required: true
+
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: Fill in whatever applies.
+      value: |
+        - GShare version / image tag:
+        - Install method: (docker compose | helm incluster | helm dockerhub | data plane)
+        - Kubernetes version:
+        - GPU model and driver:
+        - HAMi version:
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant logs
+      description: |
+        Useful sources: `kubectl -n gshare-system logs deploy/gshare-api`,
+        `kubectl -n gshare-system logs deploy/gshare-operator`,
+        `kubectl -n gshare-sessions describe gsharesession <name>`.
+        Redact tokens, kubeconfigs, and personal data before pasting.
+      render: shell

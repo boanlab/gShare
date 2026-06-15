@@ -1,0 +1,175 @@
+diff --git a/pkg/device/devices.go b/pkg/device/devices.go
+index e0986a4..803f93d 100644
+--- a/pkg/device/devices.go
++++ b/pkg/device/devices.go
+@@ -93,6 +93,10 @@ type DeviceUsage struct {
+ 	Numa        int
+ 	Type        string
+ 	Health      bool
++	// Yielded marks a card whose owner has in-place-yielded it (VRAM evicted, physical card
++	// free) per the GShare ledger. For a preemptible pod the scheduler treats such a card as
++	// empty capacity (GShare borrow). Set from the node annotation gshare.io/yielded-gpus.
++	Yielded     bool
+ 	PodInfos    []*PodInfo
+ 	CustomInfo  map[string]any
+ }
+diff --git a/pkg/device/nvidia/device.go b/pkg/device/nvidia/device.go
+index d626ee6..e02cfbc 100644
+--- a/pkg/device/nvidia/device.go
++++ b/pkg/device/nvidia/device.go
+@@ -730,6 +730,12 @@ func fitQuota(tmpDevs map[string]device.ContainerDevices, allocated *device.PodD
+ 	return device.GetLocalCache().FitQuota(ns, mem, MemoryFactor, core, NvidiaGPUDevice)
+ }
+ 
++// gsharePreemptiblePod reports whether the pod is a GShare preemptible (borrow) pod, eligible to
++// be placed on a yielded card. (docs/paper/hami-extender-integration.md)
++func gsharePreemptiblePod(pod *corev1.Pod) bool {
++	return pod != nil && pod.GetAnnotations()["gshare.io/preemptible"] == "true"
++}
++
+ func (nv *NvidiaGPUDevices) Fit(devices []*device.DeviceUsage, request device.ContainerDeviceRequest, pod *corev1.Pod, nodeInfo *device.NodeInfo, allocated *device.PodDevices) (bool, map[string]device.ContainerDevices, string) {
+ 	k := request
+ 	originReq := k.Nums
+@@ -741,6 +747,14 @@ func (nv *NvidiaGPUDevices) Fit(devices []*device.DeviceUsage, request device.Co
+ 	needTopology := util.GetGPUSchedulerPolicyByPod(device.GPUSchedulerPolicy, pod) == util.GPUSchedulerPolicyTopology.String()
+ 	for i := len(devices) - 1; i >= 0; i-- {
+ 		dev := devices[i]
++		// GShare borrow: for a preemptible pod, a yielded card (owner VRAM evicted, physically
++		// free) is free capacity — evaluate fit against a copy with owner usage zeroed, leaving
++		// global usage untouched. (docs/paper/hami-extender-integration.md)
++		if dev.Yielded && gsharePreemptiblePod(pod) {
++			free := *dev
++			free.Used, free.Usedmem, free.Usedcores = 0, 0, 0
++			dev = &free
++		}
+ 		klog.V(4).InfoS("scoring pod", "pod", klog.KObj(pod), "device", dev.ID, "Memreq", k.Memreq, "MemPercentagereq", k.MemPercentagereq, "Coresreq", k.Coresreq, "Nums", k.Nums, "device index", i)
+ 		if !dev.Health {
+ 			reason[common.CardNotHealth]++
+diff --git a/pkg/device/nvidia/gshare_yield_test.go b/pkg/device/nvidia/gshare_yield_test.go
+new file mode 100644
+index 0000000..1c7bbc7
+--- /dev/null
++++ b/pkg/device/nvidia/gshare_yield_test.go
+@@ -0,0 +1,71 @@
++/*
++Copyright 2024 The HAMi Authors.
++
++Licensed under the Apache License, Version 2.0 (the "License");
++you may not use this file except in compliance with the License.
++You may obtain a copy of the License at
++
++    http://www.apache.org/licenses/LICENSE-2.0
++
++Unless required by applicable law or agreed to in writing, software
++distributed under the License is distributed on an "AS IS" BASIS,
++WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++See the License for the specific language governing permissions and
++limitations under the License.
++*/
++
++package nvidia
++
++import (
++	"testing"
++
++	corev1 "k8s.io/api/core/v1"
++	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
++
++	"github.com/Project-HAMi/HAMi/pkg/device"
++)
++
++// GShare in-place-yield borrow: a preemptible pod fits onto a fully-occupied card iff that card
++// is yielded (owner VRAM evicted); non-preemptible pods and non-yielded cards are unaffected.
++func TestFit_GShareYieldedBorrow(t *testing.T) {
++	nv := InitNvidiaDevice(NvidiaConfig{
++		ResourceCountName:            "nvidia.com/gpu",
++		ResourceMemoryName:           "nvidia.com/gpumem",
++		ResourceCoreName:             "nvidia.com/gpumem",
++		ResourceMemoryPercentageName: "nvidia.com/gpumem-percentage",
++	})
++	req := device.ContainerDeviceRequest{Nums: 1, Memreq: 512, Coresreq: 50, Type: NvidiaGPUDevice}
++
++	// A fully-occupied card (owner using all slices/mem/cores).
++	fullCard := func(yielded bool) []*device.DeviceUsage {
++		return []*device.DeviceUsage{{
++			ID: "gpu-yield", Index: 0, Used: 100, Count: 100,
++			Usedmem: 1280, Totalmem: 1280, Usedcores: 100, Totalcore: 100,
++			Numa: 0, Type: NvidiaGPUDevice, Health: true, Yielded: yielded,
++		}}
++	}
++	pod := func(preemptible bool) *corev1.Pod {
++		annos := map[string]string{}
++		if preemptible {
++			annos["gshare.io/preemptible"] = "true"
++		}
++		return &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Annotations: annos}}
++	}
++
++	cases := []struct {
++		name                    string
++		yielded, preempt, wantFit bool
++	}{
++		{"preemptible borrow fits on yielded card", true, true, true},
++		{"non-preemptible rejected on yielded card", true, false, false},
++		{"preemptible rejected on non-yielded full card", false, true, false},
++	}
++	for _, c := range cases {
++		t.Run(c.name, func(t *testing.T) {
++			fit, _, _ := nv.Fit(fullCard(c.yielded), req, pod(c.preempt), &device.NodeInfo{}, &device.PodDevices{})
++			if fit != c.wantFit {
++				t.Fatalf("Fit=%v want %v", fit, c.wantFit)
++			}
++		})
++	}
++}
+diff --git a/pkg/scheduler/scheduler.go b/pkg/scheduler/scheduler.go
+index 57d40a5..ac18e34 100644
+--- a/pkg/scheduler/scheduler.go
++++ b/pkg/scheduler/scheduler.go
+@@ -522,6 +522,24 @@ func (s *Scheduler) InspectAllNodesUsage() *map[string]*NodeUsage {
+ 
+ // returns all nodes and its device memory usage, and we filter it with nodeSelector, taints, nodeAffinity
+ // unschedulerable and nodeName.
++// gshareYieldedAnnotation lists (CSV) the GPU UUIDs on a node that GShare has in-place-yielded
++// (VRAM evicted, physically free). The GShare operator publishes it.
++const gshareYieldedAnnotation = "gshare.io/yielded-gpus"
++
++// gshareYieldedGPUs returns the set of yielded GPU UUIDs published on the node.
++func gshareYieldedGPUs(node *corev1.Node) map[string]bool {
++	out := map[string]bool{}
++	if node == nil {
++		return out
++	}
++	for _, u := range strings.Split(node.GetAnnotations()[gshareYieldedAnnotation], ",") {
++		if u = strings.TrimSpace(u); u != "" {
++			out[u] = true
++		}
++	}
++	return out
++}
++
+ func (s *Scheduler) getNodesUsage(nodes *[]string, task *corev1.Pod) (*map[string]*NodeUsage, map[string]string, error) {
+ 	overallnodeMap := make(map[string]*NodeUsage)
+ 	cachenodeMap := make(map[string]*NodeUsage)
+@@ -535,6 +553,13 @@ func (s *Scheduler) getNodesUsage(nodes *[]string, task *corev1.Pod) (*map[strin
+ 		nodeInfo := &NodeUsage{}
+ 		userGPUPolicy := util.GetGPUSchedulerPolicyByPod(device.GPUSchedulerPolicy, task)
+ 		nodeInfo.Node = node.Node
++		// GShare in-place-yield: cards the owner has yielded (VRAM evicted, physically free) are
++		// published on the node as gshare.io/yielded-gpus (CSV of GPU UUIDs). Read the LIVE node from
++		// the lister — the cached node.Node only refreshes on hami.io device-registration changes, so a
++		// yielded-annotation change would otherwise be missed. Mark matching devices so Fit treats them
++		// as free capacity for preemptible (borrow) pods. (docs/paper/hami-extender-integration.md)
++		liveNode, _ := s.nodeLister.Get(node.ID)
++		yielded := gshareYieldedGPUs(liveNode)
+ 		nodeInfo.Devices = policy.DeviceUsageList{
+ 			Policy:      userGPUPolicy,
+ 			DeviceLists: make([]*policy.DeviceListsScore, 0),
+@@ -561,6 +586,7 @@ func (s *Scheduler) getNodesUsage(nodes *[]string, task *corev1.Pod) (*map[strin
+ 						Type:        d.Type,
+ 						Numa:        d.Numa,
+ 						Health:      d.Health,
++						Yielded:     yielded[d.ID],
+ 						PodInfos:    make([]*device.PodInfo, 0),
+ 						CustomInfo:  maps.Clone(d.CustomInfo),
+ 					},

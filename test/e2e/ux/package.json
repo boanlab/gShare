@@ -1,0 +1,13 @@
+{
+  "name": "gshare-ux-audit",
+  "private": true,
+  "type": "module",
+  "description": "Persona-driven UX audit of the GShare console. No GPU or cluster required.",
+  "scripts": {
+    "audit": "node audit.js",
+    "screenshots": "node screenshots.js"
+  },
+  "devDependencies": {
+    "playwright": "1.48.2"
+  }
+}

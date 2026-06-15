@@ -1,0 +1,308 @@
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.15.0
+  name: gsharesessions.gshare.io
+spec:
+  group: gshare.io
+  names:
+    kind: GShareSession
+    listKind: GShareSessionList
+    plural: gsharesessions
+    shortNames:
+    - gss
+    singular: gsharesession
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .status.phase
+      name: Phase
+      type: string
+    - jsonPath: .spec.mode
+      name: Mode
+      type: string
+    - jsonPath: .status.boundGpuUuid
+      name: GPU
+      type: string
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1
+    schema:
+      openAPIV3Schema:
+        description: GShareSession is the Schema for the gsharesessions API.
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: GShareSessionSpec is the desired state filled by the SoT
+              control plane on admission.
+            properties:
+              billingWalletId:
+                description: 'BillingWalletID is carried for reporting/audit only.
+                  Optional: CPU (free) sessions have no wallet.'
+                type: string
+              borrowedGpuUuid:
+                description: |-
+                  BorrowedGpuUuid: when set, this is a spot session placed on a resident's yielded card. The Pod
+                  is built device-plugin-BYPASS — the card is injected by UUID (NVIDIA_VISIBLE_DEVICES), with NO
+                  nvidia.com/gpu request, pinned to BorrowedNode. (docs/paper/manuscript, §Design)
+                type: string
+              borrowedNode:
+                description: 'BorrowedNode: the node holding the borrowed (yielded)
+                  card; the borrow Pod is pinned here.'
+                type: string
+              clusterId:
+                description: ClusterID is the Cluster this session is bound to (no
+                  federation).
+                type: string
+              clusterMode:
+                description: 'ClusterMode: single | multi.'
+                enum:
+                - single
+                - multi
+                type: string
+              connect:
+                description: Connect is the source of per-session connection credentials.
+                properties:
+                  proxyTokenSecretRef:
+                    description: |-
+                      ProxyTokenSecretRef optionally references an existing Secret holding the
+                      code-server / web-app proxy token, instead of inlining it in the CR.
+                    type: string
+                type: object
+              cpu:
+                description: Cpu is the vCPU (cores) allotment from the offering flavor
+                  — Pod request=limit (Guaranteed).
+                minimum: 0
+                type: integer
+              diskGb:
+                description: DiskGb is the ephemeral scratch disk (GiB) — Pod ephemeral-storage
+                  request=limit (evict on exceed).
+                minimum: 0
+                type: integer
+              gpuCores:
+                description: GpuCores is the fractional core percentage 0..100 (nvidia.com/gpucores).
+                maximum: 100
+                minimum: 0
+                type: integer
+              gpuMemMb:
+                description: GpuMemMb is the fractional VRAM hard limit (nvidia.com/gpumem).
+                type: integer
+              gracefulDemote:
+                description: |-
+                  GracefulDemote: on a yield→cold demotion (reservation-TTL expiry), toggle VRAM back into the
+                  live process and delete the Pod with its grace period so the job saves a FRESH checkpoint on
+                  SIGTERM, instead of cold-deleting the suspended process. Set by the control plane only when the
+                  card is NOT lent (physically free, so restore is safe). (docs/paper/manuscript, §Design)
+                type: boolean
+              image:
+                description: Image is the session container image.
+                type: string
+              losslessPause:
+                description: |-
+                  LosslessPause: when paused, attempt a state-preserving checkpoint (cuda-checkpoint + CRIU)
+                  rather than a plain Pod delete, so resume can restore VRAM/process state. Set at session
+                  creation from the offering+node capability gate. Falls back to cold pause if a checkpointer
+                  is unavailable or the checkpoint fails.
+                type: boolean
+              memGb:
+                description: MemGb is the RAM (GiB) allotment — Pod request=limit
+                  (Guaranteed, OOMKill on exceed).
+                minimum: 0
+                type: integer
+              migProfile:
+                description: MigProfile is the MIG profile for mode=mig, e.g. "1g.5gb".
+                type: string
+              mode:
+                description: 'Mode: fractional | exclusive | mig. Empty for cpu sessions.'
+                enum:
+                - fractional
+                - exclusive
+                - mig
+                type: string
+              offeringId:
+                description: OfferingID is the resolved offering this session was
+                  admitted against.
+                type: string
+              owner:
+                description: Owner is the owning user identifier (informational).
+                type: string
+              pauseMode:
+                description: |-
+                  PauseMode: how a pause releases the GPU. "cold" (default) deletes the Pod; "yield" keeps the
+                  Pod alive and evicts VRAM via cuda-checkpoint (in-place GPU yield) so resume is lossless and
+                  the physical card can be lent to a preemptible spot session. (docs/paper/manuscript, §Design)
+                enum:
+                - cold
+                - yield
+                type: string
+              paused:
+                description: |-
+                  Paused: when true the operator deletes the session Pod to release the GPU but keeps
+                  the CR (phase=Paused, not Terminated). Resuming (false) recreates the Pod and re-binds a GPU.
+                type: boolean
+              preemptible:
+                description: 'Preemptible: this session may be admitted onto a yielded
+                  (lent) card and reclaimed (SIGTERM'
+                type: boolean
+              projectId:
+                description: |-
+                  ProjectID is the owning project (tenant) identifier (informational). Optional: a session
+                  may have no project (personal/CPU).
+                type: string
+              resourceClass:
+                description: 'ResourceClass: gpu (billed) | cpu (free, no GPU requested).'
+                enum:
+                - gpu
+                - cpu
+                type: string
+              volumes:
+                description: Volumes to mount into the session Pod.
+                items:
+                  description: VolumeSpec is one persistent volume to mount into the
+                    session Pod.
+                  properties:
+                    mode:
+                      description: 'Mode is the access mode: ReadWriteOnce | ReadWriteMany
+                        | ReadOnlyMany.'
+                      enum:
+                      - ReadWriteOnce
+                      - ReadWriteMany
+                      - ReadOnlyMany
+                      type: string
+                    mountPath:
+                      description: MountPath is the in-container mount path, e.g.
+                        /workspace.
+                      type: string
+                    name:
+                      description: Name is the logical volume name (also used as the
+                        PVC/mount identifier).
+                      type: string
+                  required:
+                  - mode
+                  - mountPath
+                  - name
+                  type: object
+                type: array
+            required:
+            - clusterId
+            - clusterMode
+            - image
+            - offeringId
+            - owner
+            - resourceClass
+            type: object
+          status:
+            description: |-
+              GShareSessionStatus is the observed state filled by this operator. The SoT control
+              plane reads it to drive the ledger (running->consume, terminated->settle).
+            properties:
+              boundGpuUuid:
+                description: BoundGpuUuid is the GPU bound by hami-scheduler / device-plugin.
+                type: string
+              checkpointNode:
+                description: |-
+                  CheckpointNode is the node holding the checkpoint (content-store image + hostPath dir
+                  are node-local). Recorded at checkpoint time so cleanup can target that node on
+                  cold-resume / terminate. Empty when no checkpoint exists.
+                type: string
+              checkpointRef:
+                description: |-
+                  CheckpointRef is the storage reference of the last lossless-pause checkpoint
+                  (empty when paused cold or never checkpointed).
+                type: string
+              conditions:
+                description: Conditions is the list of detailed status conditions.
+                items:
+                  description: SessionCondition mirrors metav1.Condition semantics
+                    for richer status.
+                  properties:
+                    lastTransitionTime:
+                      description: LastTransitionTime is when the condition last changed.
+                      format: date-time
+                      type: string
+                    message:
+                      description: Message is a human-readable detail.
+                      type: string
+                    reason:
+                      description: Reason is a machine-readable reason for the condition's
+                        last transition.
+                      type: string
+                    status:
+                      description: 'Status: "True" | "False" | "Unknown".'
+                      type: string
+                    type:
+                      description: Type of the condition, e.g. "Ready" | "PodScheduled".
+                      type: string
+                  required:
+                  - status
+                  - type
+                  type: object
+                type: array
+                x-kubernetes-list-map-keys:
+                - type
+                x-kubernetes-list-type: map
+              evictedVramMb:
+                description: EvictedVramMb is the VRAM moved to host RAM while yielded
+                  (host-RAM cost accounting).
+                type: integer
+              lastTransitionTime:
+                description: LastTransitionTime is when Phase last changed.
+                format: date-time
+                type: string
+              lentTo:
+                description: LentTo is the spot session id currently using this yielded
+                  card (empty if free/lent-none).
+                type: string
+              message:
+                description: Message is a human-readable status detail.
+                type: string
+              observedGeneration:
+                description: ObservedGeneration is the .metadata.generation last reconciled.
+                format: int64
+                type: integer
+              phase:
+                description: 'Phase: Pending | Preparing | Running | Terminating |
+                  Terminated | Error.'
+                type: string
+              podRef:
+                description: PodRef is namespace/name of the session Pod.
+                type: string
+              traceId:
+                description: |-
+                  TraceID is the W3C traceparent trace-id restored from the CR annotation
+                  gshare.io/traceparent, echoed on the status callback.
+                type: string
+              usedMemMb:
+                description: UsedMemMb is the measured VRAM occupancy (inventory reconciliation).
+                type: integer
+              yieldState:
+                description: |-
+                  YieldState: "" (not yielded) | "Yielded" (VRAM evicted, Pod alive, card lendable) |
+                  "Lent" (a spot session is using the card). Distinguishes in-place yield from cold pause and
+                  tells resume to toggle VRAM back rather than recreate the Pod. (GPU yield and lending; see docs/paper/)
+                type: string
+            type: object
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}

@@ -1,0 +1,7 @@
+Highlights (Elsevier / FGCS — 3 to 5 bullets, each <= 85 characters incl. spaces)
+
+- Model GPU occupancy as a memory hierarchy: VRAM, host RAM, disk, durable tiers
+- Lossless, app-transparent preemptible sharing of exclusive GPUs on Kubernetes
+- Keeping the pod alive sidesteps the K8s CRI restore wall (sandbox-netns lifetime)
+- Validated on RTX-4090: lossless host-RAM and disk tiers, 6.4x faster reclaim
+- Real 2-node multi-tenant reclaim plus a cross-validated, trace-grounded simulator

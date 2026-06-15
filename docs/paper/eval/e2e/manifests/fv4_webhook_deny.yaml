@@ -1,0 +1,18 @@
+# FV4 admission-webhook deny: a device-plugin-bypass Pod (NVIDIA_VISIBLE_DEVICES set, no
+# nvidia.com/gpu) pinning a card that is NOT yielded. `kubectl apply` is REJECTED by the
+# lend-guard webhook: "GPU <uuid> is not a yielded/lendable card". Replace the UUID with
+# a real non-yielded card UUID on your cluster.
+apiVersion: v1
+kind: Pod
+metadata: {name: fv4-webhook-deny, namespace: gshare-sessions}
+spec:
+  restartPolicy: Never
+  nodeSelector: {kubernetes.io/hostname: gpu2-1}
+  securityContext: {runAsNonRoot: true, runAsUser: 1000, seccompProfile: {type: RuntimeDefault}}
+  containers:
+  - name: c
+    image: busybox
+    command: ["sleep","30"]
+    securityContext: {allowPrivilegeEscalation: false, capabilities: {drop: ["ALL"]}}
+    env:
+    - {name: NVIDIA_VISIBLE_DEVICES, value: "GPU-REPLACE-WITH-NON-YIELDED-CARD-UUID"}

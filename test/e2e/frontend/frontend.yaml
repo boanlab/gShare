@@ -1,0 +1,46 @@
+# The console: the SPA served by nginx with /api proxied, exposed through ingress-nginx on NodePort
+# 30080.
+# deploy.sh rewrites docker.io/boanlab/gshare-frontend:latest to ${REGISTRY}/${ORG}/…:${TAG}.
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata: { name: gshare-frontend, namespace: gshare-system }
+spec:
+  replicas: 1
+  selector: { matchLabels: { app: gshare-frontend } }
+  template:
+    metadata: { labels: { app: gshare-frontend } }
+    spec:
+      containers:
+        - name: frontend
+          image: docker.io/boanlab/gshare-frontend:latest
+          imagePullPolicy: Always
+          ports: [ { containerPort: 80, name: http } ]
+          readinessProbe:
+            httpGet: { path: /, port: http }
+            initialDelaySeconds: 3
+---
+apiVersion: v1
+kind: Service
+metadata: { name: gshare-frontend, namespace: gshare-system }
+spec:
+  selector: { app: gshare-frontend }
+  ports: [ { port: 80, targetPort: http } ]
+---
+# Everything goes to the frontend's nginx, which serves the SPA and proxies /api internally.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: gshare-console
+  namespace: gshare-system
+  annotations:
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"   # keeps the SSE session event stream open
+spec:
+  ingressClassName: nginx
+  rules:
+    - http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service: { name: gshare-frontend, port: { number: 80 } }

@@ -1,0 +1,60 @@
+# Sample fractional (HAMi) GShareSession — normally applied by the Python control plane.
+apiVersion: gshare.io/v1
+kind: GShareSession
+metadata:
+  name: sample-fractional
+  namespace: gshare-sessions
+  annotations:
+    # W3C traceparent injected by the control plane; operator restores trace_id.
+    gshare.io/traceparent: "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01"
+spec:
+  clusterId: clu_abc123
+  resourceClass: gpu
+  mode: fractional
+  gpuMemMb: 4000
+  gpuCores: 30
+  image: registry.gshare.internal/base/pytorch:2.3
+  offeringId: off_demo
+  clusterMode: single
+  volumes:
+    - name: workspace
+      mountPath: /workspace
+      mode: ReadWriteOnce
+  connect:
+    proxyTokenSecretRef: ""
+  billingWalletId: wal_demo
+  owner: usr_demo
+  projectId: prj_demo
+---
+# Sample exclusive GPU session: the standard device plugin, bypassing HAMi.
+apiVersion: gshare.io/v1
+kind: GShareSession
+metadata:
+  name: sample-exclusive
+  namespace: gshare-sessions
+spec:
+  clusterId: clu_abc123
+  resourceClass: gpu
+  mode: exclusive
+  image: registry.gshare.internal/base/cuda:12.4
+  offeringId: off_exclusive
+  clusterMode: single
+  billingWalletId: wal_demo
+  owner: usr_demo
+  projectId: prj_demo
+---
+# Sample CPU (free) session — no GPU requested, node-type=cpu.
+apiVersion: gshare.io/v1
+kind: GShareSession
+metadata:
+  name: sample-cpu
+  namespace: gshare-sessions
+spec:
+  clusterId: clu_abc123
+  resourceClass: cpu
+  image: registry.gshare.internal/base/jupyter:latest
+  offeringId: off_cpu_free
+  clusterMode: single
+  billingWalletId: wal_demo
+  owner: usr_demo
+  projectId: prj_demo

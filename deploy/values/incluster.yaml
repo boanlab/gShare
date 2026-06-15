@@ -1,0 +1,44 @@
+# All-in-one, in-cluster values: public Docker Hub images, with the chart deploying the data tier,
+# secrets, CRDs, and namespaces as well.
+#   Deploy with `make deploy-incluster`; nothing has to be set up first.
+# TLS is terminated by a reverse proxy in front, which also manages the certificate; the cluster
+# receives plain HTTP on :30080.
+# For production against external CloudNativePG, Redis, and external-secrets, use dockerhub.yaml.
+global:
+  imageRegistry: docker.io/boanlab
+  imagePullSecrets: []          # the images are public
+  # The domain (domains.console) and the administrator identity (bootstrapAdmin) live in
+  # domain.yaml, which is not committed. Do not put real values here.
+  #   cp deploy/values/domain.example.yaml deploy/values/domain.yaml, then fill it in.
+  # `make deploy-incluster` applies that file with -f when it exists, and otherwise falls back to
+  # the chart defaults of gshare.example.com and admin@example.com.
+
+images:
+  api:      { repository: gshare-backend,  tag: "latest", pullPolicy: IfNotPresent }
+  worker:   { repository: gshare-backend,  tag: "latest", pullPolicy: IfNotPresent }
+  operator: { repository: gshare-operator, tag: "latest", pullPolicy: IfNotPresent }
+  frontend: { repository: gshare-frontend, tag: "latest", pullPolicy: IfNotPresent }
+
+# The chart deploys the namespaces, the CRDs (from crds/), the data tier, and the secrets, so there
+# is nothing to set up by hand.
+createNamespaces: true
+postgres:  { inCluster: true }
+redis:     { inCluster: true }
+secrets:   { generate: true }
+# The control plane runs inside the cluster it drives, so the local Cluster row is seeded
+# automatically; it is what the inventory foreign keys point at.
+bootstrapLocalCluster: true
+
+# ── Operator feature gates. All-in-one turns these on by default. ──
+operator:
+  # Node agent for in-place yield, borrowing, and graceful demotion, using cuda-checkpoint and CRIU.
+  # On a node that does not qualify, pause falls back to cold.
+  losslessAgentImage: docker.io/boanlab/gshare-lossless-agent:latest
+  # The lend-guard ValidatingWebhook, enforcing the borrow invariants at admission with
+  # failurePolicy=Ignore.
+  webhook:
+    enabled: true
+  # The idle reaper reads utilisation from HAMi's vGPU monitor, which the stock HAMi installed by
+  # cluster-bootstrap already runs. That gives workload-aware idle reclamation with no separate
+  # monitoring stack. If you run your own Prometheus, use prometheusUrl instead.
+  hamiMonitorUrl: "http://hami-device-plugin-monitor.kube-system.svc:31992"

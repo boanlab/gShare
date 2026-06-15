@@ -1,0 +1,89 @@
+# Local GShare control plane (`make compose-up`).
+#
+# Console (frontend) on :8000, API on :8080 — both plain HTTP. The deployment model
+# assumes an operator-owned reverse proxy in front terminates TLS for the console
+# domain and forwards to :8000 while preserving Host and X-Forwarded-* headers.
+#
+# Session connect links are built from GSHARE_SESSION_URL_SCHEME (default https)
+# and GSHARE_SESSION_DOMAIN.
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: gshare
+      POSTGRES_PASSWORD: gshare
+      POSTGRES_DB: gshare
+    volumes: [pgdata:/var/lib/postgresql/data]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U gshare"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  redis:
+    image: redis:7
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  gshare-api:
+    image: ${REGISTRY:-docker.io}/${ORG:-boanlab}/gshare-backend:${TAG:-latest}
+    build: ./backend
+    command: sh -c "alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port 8080 --proxy-headers --forwarded-allow-ips=*"
+    environment:
+      GSHARE_DATABASE_URL: postgresql+asyncpg://gshare:gshare@postgres:5432/gshare
+      GSHARE_REDIS_URL: redis://redis:6379/0
+      GSHARE_AUTH_ALLOW_LOCAL_PASSWORD: "true"
+      # Development defaults; e2e scripts sign their tokens with this secret.
+      GSHARE_USER_JWT_SECRET: ${GSHARE_USER_JWT_SECRET:-gshare-dev-secret}
+      GSHARE_BOOTSTRAP_ADMIN_EMAIL: ${GSHARE_BOOTSTRAP_ADMIN_EMAIL:-admin@example.com}
+      GSHARE_BOOTSTRAP_ADMIN_PASSWORD: ${GSHARE_BOOTSTRAP_ADMIN_PASSWORD:-change-me-please}
+      # Console/ingress domain of the registered cluster; session connect links point here.
+      GSHARE_SESSION_DOMAIN: ${GSHARE_SESSION_DOMAIN:-gshare.example.com}
+      GSHARE_SESSION_URL_SCHEME: ${GSHARE_SESSION_URL_SCHEME:-https}
+      # ── Internal plane (needed only when an external operator attaches) ──
+      # Leaving the key empty runs the stack explore-only: operator authentication is
+      # disabled. `hack/gen-secrets.sh` writes an RS256 key and kid into .env; the API
+      # verifies its own tokens against the JWKS it publishes.
+      GSHARE_INTERNAL_JWT_PRIVATE_KEY: ${GSHARE_INTERNAL_JWT_PRIVATE_KEY:-}
+      GSHARE_INTERNAL_JWT_KID: ${GSHARE_INTERNAL_JWT_KID:-internal}
+      GSHARE_INTERNAL_JWKS_URL: http://localhost:8080/.well-known/gshare-internal-jwks.json
+      # Kubeconfigs of registered clusters, as <cluster_id>/kubeconfig. Never stored in the database.
+      GSHARE_CLUSTER_KUBECONFIG_DIR: /run/gshare/clusters
+    depends_on:
+      postgres: { condition: service_healthy }
+      redis: { condition: service_healthy }
+    ports: ["8080:8080"]
+    volumes:
+      - ./deploy/clusters:/run/gshare/clusters:ro
+
+  gshare-worker:
+    image: ${REGISTRY:-docker.io}/${ORG:-boanlab}/gshare-backend:${TAG:-latest}
+    build: ./backend
+    command: python -m app.workers.runner
+    environment:
+      GSHARE_DATABASE_URL: postgresql+asyncpg://gshare:gshare@postgres:5432/gshare
+      GSHARE_REDIS_URL: redis://redis:6379/0
+      GSHARE_CLUSTER_KUBECONFIG_DIR: /run/gshare/clusters
+    depends_on:
+      postgres: { condition: service_healthy }
+      redis: { condition: service_healthy }
+    volumes:
+      - ./deploy/clusters:/run/gshare/clusters:ro
+
+  gshare-frontend:
+    image: ${REGISTRY:-docker.io}/${ORG:-boanlab}/gshare-frontend:${TAG:-latest}
+    build: ./frontend
+    depends_on: [gshare-api]
+    ports: ["8000:80"]
+    environment:
+      # Ingress (NodePort) of an external GPU cluster, e.g. 10.0.0.10:30080. When set,
+      # the console relays /proxy/ session traffic there. Leave empty to disable relaying —
+      # an all-in-one Kubernetes install serves /proxy/ from the cluster ingress directly.
+      GSHARE_SESSION_INGRESS: ${GSHARE_SESSION_INGRESS:-}
+      GSHARE_SESSION_DOMAIN: ${GSHARE_SESSION_DOMAIN:-}
+
+volumes:
+  pgdata:

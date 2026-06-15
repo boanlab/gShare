@@ -1,0 +1,3 @@
+[submodule "third_party/hami"]
+	path = third_party/hami
+	url = https://github.com/Project-HAMi/HAMi.git

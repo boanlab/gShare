@@ -1,0 +1,39 @@
+{{- if .Values.ingress.enabled }}
+# Console ingress on ingress-nginx, receiving plain HTTP only. TLS is terminated and managed by a
+# reverse proxy in front, which forwards to the cluster NodePort (:30080) and sends the Host (the
+# console domain) and X-Forwarded-Proto.
+#
+# Session web proxying (/proxy/ses_*) is not handled here: the operator creates a per-session Ingress
+# for that. This one covers the console SPA and the API gateway.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: gshare-console
+  namespace: {{ .Values.global.namespaces.system }}
+  labels:
+    {{- include "gshare.labels" . | nindent 4 }}
+  annotations:
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"   # keeps SSE streams open
+    nginx.ingress.kubernetes.io/proxy-buffering: "off"        # SSE flush
+    {{- with .Values.ingress.annotations }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  ingressClassName: {{ .Values.ingress.className }}
+  rules:
+    - host: {{ .Values.global.domains.console | quote }}
+      http:
+        paths:
+          - path: /api
+            pathType: Prefix
+            backend:
+              service:
+                name: api
+                port: { number: 80 }
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: frontend
+                port: { number: 80 }
+{{- end }}

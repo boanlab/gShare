@@ -1,0 +1,117 @@
+# Per-GPU utilization source for the idle reaper's workload-aware idle detection.
+#
+# Deploys dcgm-exporter (DaemonSet on GPU nodes) which emits DCGM_FI_DEV_GPU_UTIL{UUID=...},
+# and a minimal Prometheus that scrapes it. Point the operator at this Prometheus to activate
+# workload-aware idle (Helm: operator.prometheusUrl=http://prometheus.monitoring.svc:9090).
+# Without it the reaper falls back to a wall-clock idle window. (docs/paper/idle-auto-pause.md)
+#
+#   kubectl apply -f deploy/monitoring/dcgm-prometheus.yaml
+#
+# Node prerequisites: nvidia runtimeClass + the GPU node label gshare.io/gpu=true.
+apiVersion: v1
+kind: Namespace
+metadata: { name: monitoring }
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: dcgm-exporter
+  namespace: monitoring
+spec:
+  selector:
+    matchLabels: { app: dcgm-exporter }
+  template:
+    metadata:
+      labels: { app: dcgm-exporter }
+    spec:
+      runtimeClassName: nvidia
+      nodeSelector: { gshare.io/gpu: "true" }
+      tolerations:
+        - { operator: Exists }
+      containers:
+        - name: dcgm-exporter
+          image: nvcr.io/nvidia/k8s/dcgm-exporter:3.3.9-3.6.1-ubuntu22.04
+          env:
+            - { name: DCGM_EXPORTER_LISTEN, value: ":9400" }
+          ports:
+            - { name: metrics, containerPort: 9400 }
+          securityContext:
+            capabilities: { add: ["SYS_ADMIN"] }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: dcgm-exporter
+  namespace: monitoring
+  labels: { app: dcgm-exporter }
+spec:
+  selector: { app: dcgm-exporter }
+  ports:
+    - { name: metrics, port: 9400, targetPort: 9400 }
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata: { name: prometheus, namespace: monitoring }
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata: { name: prometheus-monitoring }
+rules:
+  - apiGroups: [""]
+    resources: ["endpoints", "pods", "services", "nodes"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata: { name: prometheus-monitoring }
+roleRef: { apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: prometheus-monitoring }
+subjects:
+  - { kind: ServiceAccount, name: prometheus, namespace: monitoring }
+---
+apiVersion: v1
+kind: ConfigMap
+metadata: { name: prometheus-config, namespace: monitoring }
+data:
+  prometheus.yml: |
+    global: { scrape_interval: 15s }
+    scrape_configs:
+      - job_name: dcgm
+        kubernetes_sd_configs:
+          - role: endpoints
+            namespaces: { names: [monitoring] }
+        relabel_configs:
+          - source_labels: [__meta_kubernetes_service_label_app]
+            regex: dcgm-exporter
+            action: keep
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata: { name: prometheus, namespace: monitoring }
+spec:
+  replicas: 1
+  selector: { matchLabels: { app: prometheus } }
+  template:
+    metadata: { labels: { app: prometheus } }
+    spec:
+      serviceAccountName: prometheus
+      containers:
+        - name: prometheus
+          image: prom/prometheus:v2.54.1
+          args:
+            - "--config.file=/etc/prometheus/prometheus.yml"
+            - "--storage.tsdb.path=/prometheus"
+            - "--storage.tsdb.retention.time=2h"
+          ports: [{ containerPort: 9090 }]
+          volumeMounts:
+            - { name: config, mountPath: /etc/prometheus }
+            - { name: data, mountPath: /prometheus }
+      volumes:
+        - { name: config, configMap: { name: prometheus-config } }
+        - { name: data, emptyDir: {} }
+---
+apiVersion: v1
+kind: Service
+metadata: { name: prometheus, namespace: monitoring }
+spec:
+  selector: { app: prometheus }
+  ports: [{ port: 9090, targetPort: 9090 }]

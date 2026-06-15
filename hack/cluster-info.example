@@ -1,0 +1,15 @@
+# GShare cluster node definitions. Copy this to hack/cluster-info and fill it in.
+# Requires SSH key authentication from the control machine to each node, and passwordless remote sudo.
+#
+# MASTER_NODE is the control plane, labelled cpu. WORKER_NODES lists the GPU workers, comma
+# separated, as user@ip:MODE where MODE is exclusive or fractional (fractional if omitted).
+
+MASTER_NODE=ubuntu@10.0.0.10
+WORKER_NODES=ubuntu@10.10.0.196:exclusive,ubuntu@10.10.0.197:fractional
+
+# Optional CPU_WORKERS: GPU-less workers as comma-separated user@ip, with no mode, labelled cpu. The
+# NVIDIA runtime is not installed on them.
+# CPU_WORKERS=ubuntu@10.10.0.200,ubuntu@10.10.0.201
+
+# Optional SSH_OPTS; defaults to "-o StrictHostKeyChecking=accept-new -o ConnectTimeout=10"
+# SSH_OPTS="-i ~/.ssh/id_ed25519 -o StrictHostKeyChecking=accept-new"

@@ -1,0 +1,94 @@
+# Operator Deployment: replicas:1 + leader-election single active.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: gshare-operator
+  namespace: gshare-system
+  labels:
+    app: gshare-operator
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: gshare-operator
+  template:
+    metadata:
+      labels:
+        app: gshare-operator
+    spec:
+      serviceAccountName: gshare-operator
+      securityContext:
+        runAsNonRoot: true
+      containers:
+        - name: manager
+          image: ghcr.io/gshare/cluster-operator:v1
+          args:
+            - --leader-elect
+            - --cluster-id=$(CLUSTER_ID)
+          env:
+            - name: CLUSTER_ID
+              value: "clu_REPLACE_ME"
+            - name: SESSION_NAMESPACE
+              value: "gshare-sessions"
+            # SoT (control plane) status callback base + routes.
+            - name: SOT_ENDPOINT
+              value: "https://api.gshare.internal"
+            - name: SOT_STATUS_PATH
+              value: "/internal/sessions/{id}/status"
+            - name: SOT_AUDIT_PATH            # privileged-action audit
+              value: "/internal/audit/operator"
+            - name: CONNECT_VERIFY_URL
+              value: "https://api.gshare.internal/internal/connect/verify"
+            # Plane-to-plane auth = short-lived internal JWT RS256 aud=gshare-internal
+            # (NOT a user token). Operator is token HOLDER only — the control plane holds
+            # the private key; verification uses the control plane's internal JWKS.
+            - name: SOT_AUTH
+              value: "internal-jwt"
+            - name: INTERNAL_JWT_ALG
+              value: "RS256"
+            - name: INTERNAL_JWT_AUD
+              value: "gshare-internal"
+            - name: INTERNAL_JWT_TOKEN_FILE   # short-lived token issued+rotated by the control plane
+              value: "/var/run/gshare/internal-jwt"
+            - name: INTERNAL_JWKS_URL         # verification only (no private key here)
+              value: "https://api.gshare.internal/.well-known/gshare-internal-jwks.json"
+          ports:
+            - name: metrics
+              containerPort: 8080
+            - name: probe
+              containerPort: 8081
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8081
+            initialDelaySeconds: 15
+            periodSeconds: 20
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: 8081
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          resources:
+            limits:
+              cpu: 500m
+              memory: 256Mi
+            requests:
+              cpu: 100m
+              memory: 128Mi
+          volumeMounts:
+            - name: internal-jwt
+              mountPath: /var/run/gshare
+              readOnly: true
+      volumes:
+        # The control plane issues+rotates this short-lived RS256 token (external-secrets).
+        - name: internal-jwt
+          secret:
+            secretName: gshare-operator-internal-jwt
+            optional: true
+      terminationGracePeriodSeconds: 10

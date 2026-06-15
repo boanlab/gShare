@@ -1,0 +1,18 @@
+apiVersion: v2
+name: gshare
+description: GShare control plane (api/worker/operator/frontend) Helm chart
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+keywords:
+  - gpu
+  - kubernetes
+  - gpu-sharing
+home: https://github.com/gshare/gshare
+sources:
+  - https://github.com/gshare/gshare
+maintainers:
+  - name: GShare Authors
+# Postgres (CloudNativePG), Redis, and ingress-nginx are cluster prerequisites, outside this chart.
+# The chart deploys GShare's own components — api, worker, operator, frontend — along with their
+# namespaces, RBAC, and ingress.

@@ -1,0 +1,40 @@
+name: Release chart
+
+# Publishes charts/gshare to the gh-pages Helm repository whenever the chart version
+# changes on main. chart-releaser is a no-op when the version already has a release,
+# so re-running is safe.
+on:
+  push:
+    branches: [main]
+    paths:
+      - charts/**
+      - .github/workflows/chart-release.yml
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  chart-release:
+    runs-on: ubuntu-latest
+    if: github.repository == 'boanlab/gShare'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Configure git identity
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - uses: azure/setup-helm@v4
+        with:
+          version: v3.16.3
+
+      - uses: helm/chart-releaser-action@v1.6.0
+        with:
+          charts_dir: charts
+        env:
+          CR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          CR_SKIP_EXISTING: "true"

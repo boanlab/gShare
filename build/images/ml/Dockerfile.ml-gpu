@@ -1,0 +1,29 @@
+# Base ML image on GPU: a CUDA runtime plus the three GShare connection tools and a data-science
+# stack. A GPU-capable Python environment with no deep-learning framework pinned, so users install
+# PyTorch or TensorFlow themselves if they want one.
+# Catalogue entry: name="Python ML · CUDA 12.4 · cuDNN 9 (GPU)", tag=ml-cuda12.4-cudnn9-gpu
+# Build context: build/images, so session-base/entrypoint.sh can be shared.
+FROM codercom/code-server:latest AS cs
+
+FROM nvidia/cuda:12.4.1-cudnn-runtime-ubuntu22.04
+ARG TTYD_VERSION=1.7.7
+
+COPY --from=cs /usr/lib/code-server /usr/lib/code-server
+COPY --from=cs /usr/bin/code-server /usr/bin/code-server
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      python3-pip python3-venv tini ca-certificates wget git iproute2 criu && \
+    rm -rf /var/lib/apt/lists/* && \
+    useradd -m -u 1000 -s /bin/bash coder
+RUN pip3 install --no-cache-dir \
+      jupyterlab notebook numpy pandas matplotlib scikit-learn scipy
+RUN wget -qO /usr/local/bin/ttyd \
+      "https://github.com/tsl0922/ttyd/releases/download/${TTYD_VERSION}/ttyd.x86_64" && \
+    chmod +x /usr/local/bin/ttyd
+
+COPY session-base/entrypoint.sh /usr/local/bin/gshare-session
+RUN chmod +x /usr/local/bin/gshare-session
+
+USER 1000
+ENV HOME=/home/coder
+EXPOSE 8080 8888 7681
+ENTRYPOINT ["tini", "--", "/usr/local/bin/gshare-session"]

@@ -1,0 +1,10 @@
+# Stateful training workload image (P0 progress-loss measurement). torch 2.5.1+cu124 on the
+# 4090. Build is GPU-free. Run: --gpus / k8s nvidia.com/gpu.
+#   docker build -t boanlab/gshare-e2e-train -f Dockerfile.train .
+FROM nvidia/cuda:12.4.1-runtime-ubuntu22.04
+ENV DEBIAN_FRONTEND=noninteractive
+RUN apt-get update && apt-get install -y --no-install-recommends python3-pip \
+    && rm -rf /var/lib/apt/lists/*
+RUN python3 -m pip install --no-cache-dir torch==2.5.1 torchvision==0.20.1 --index-url https://download.pytorch.org/whl/cu124
+COPY gpu_train.py /usr/local/bin/gpu_train.py
+ENTRYPOINT ["python3", "/usr/local/bin/gpu_train.py"]

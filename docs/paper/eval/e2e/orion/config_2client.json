@@ -1,0 +1,30 @@
+[
+ {
+  "arch": "resnet50",
+  "kernel_file": "/root/orion/artifact_evaluation/example/resnet50_4_fwd",
+  "num_kernels": 175,
+  "num_iters": 500,
+  "args": {
+   "model_name": "resnet50",
+   "batchsize": 4,
+   "rps": 10000,
+   "uniform": false,
+   "dummy_data": true,
+   "train": false
+  }
+ },
+ {
+  "arch": "resnet50",
+  "kernel_file": "/root/orion/artifact_evaluation/example/resnet50_4_fwd",
+  "num_kernels": 175,
+  "num_iters": 500,
+  "args": {
+   "model_name": "resnet50",
+   "batchsize": 4,
+   "rps": 10000,
+   "uniform": false,
+   "dummy_data": true,
+   "train": false
+  }
+ }
+]

@@ -1,0 +1,4 @@
+T0_apply=1782015716.228919538
+READY_t=1782015720.976
+cold_restart_wall_s=4.747080462
+cs_R2 DONE iters=148 wall=60.39 avg_gflops=54153.1 tflops=54.15 t=1782015781.364

@@ -1,0 +1,6 @@
+# Thin overlay: the GShare-patched scheduler-extender binary over the stock HAMi image.
+# Only the vgpu-scheduler-extender container's `scheduler` binary changes; everything else
+# (device-plugin, vGPUmonitor, libvgpu) is unchanged. (build/hami-fork)
+ARG BASE=docker.io/projecthami/hami:v2.9.0
+FROM ${BASE}
+COPY scheduler /k8s-vgpu/bin/scheduler

@@ -1,0 +1,344 @@
+{
+  "params": {
+    "cards": 16,
+    "node_ram_gb": 256.0,
+    "horizon_h": 24.0,
+    "seed": 20260620,
+    "IDLE_TIMEOUT_SEC": 1800,
+    "YIELD_RESERVATION_TTL_SEC": 1800,
+    "YIELD_HOST_RAM_FRACTION": 0.5,
+    "cold_a": 20.0,
+    "cold_b": 3.0
+  },
+  "by_load": [
+    {
+      "load": 0.1,
+      "policies": {
+        "keep-idle": {
+          "policy": "keep-idle",
+          "occupancy": 0.1025,
+          "resident_useful_gpu_h": 39.34,
+          "spot_useful_gpu_h": 0.0,
+          "overhead_gpu_h": 0.0,
+          "spot_jobs_served": 0,
+          "resident_resume_penalty_s_mean": 0.0,
+          "resident_resume_penalty_s_total": 0.0,
+          "idle_reclaimable_h": 173.56,
+          "resident_idle_billed_h": 173.56,
+          "spot_useful_recovered_h": 0.0,
+          "demotes": 0
+        },
+        "cold-preempt": {
+          "policy": "cold-preempt",
+          "occupancy": 0.2494,
+          "resident_useful_gpu_h": 39.34,
+          "spot_useful_gpu_h": 56.43,
+          "overhead_gpu_h": 1.352,
+          "spot_jobs_served": 569,
+          "resident_resume_penalty_s_mean": 304.25,
+          "resident_resume_penalty_s_total": 4868.0,
+          "idle_reclaimable_h": 173.56,
+          "resident_idle_billed_h": 0.0,
+          "spot_useful_recovered_h": 56.43,
+          "demotes": 0
+        },
+        "gshare": {
+          "policy": "gshare",
+          "occupancy": 0.2485,
+          "resident_useful_gpu_h": 39.34,
+          "spot_useful_gpu_h": 56.09,
+          "overhead_gpu_h": 1.068,
+          "spot_jobs_served": 569,
+          "resident_resume_penalty_s_mean": 181.56,
+          "resident_resume_penalty_s_total": 2905.0,
+          "idle_reclaimable_h": 173.56,
+          "resident_idle_billed_h": 0.0,
+          "spot_useful_recovered_h": 56.09,
+          "demotes": 39
+        }
+      }
+    },
+    {
+      "load": 0.2,
+      "policies": {
+        "keep-idle": {
+          "policy": "keep-idle",
+          "occupancy": 0.2206,
+          "resident_useful_gpu_h": 84.72,
+          "spot_useful_gpu_h": 0.0,
+          "overhead_gpu_h": 0.0,
+          "spot_jobs_served": 0,
+          "resident_resume_penalty_s_mean": 0.0,
+          "resident_resume_penalty_s_total": 0.0,
+          "idle_reclaimable_h": 59.52,
+          "resident_idle_billed_h": 59.52,
+          "spot_useful_recovered_h": 0.0,
+          "demotes": 0
+        },
+        "cold-preempt": {
+          "policy": "cold-preempt",
+          "occupancy": 0.3506,
+          "resident_useful_gpu_h": 84.72,
+          "spot_useful_gpu_h": 49.9,
+          "overhead_gpu_h": 1.955,
+          "spot_jobs_served": 478,
+          "resident_resume_penalty_s_mean": 439.88,
+          "resident_resume_penalty_s_total": 7038.0,
+          "idle_reclaimable_h": 59.52,
+          "resident_idle_billed_h": 0.0,
+          "spot_useful_recovered_h": 49.9,
+          "demotes": 0
+        },
+        "gshare": {
+          "policy": "gshare",
+          "occupancy": 0.3496,
+          "resident_useful_gpu_h": 84.72,
+          "spot_useful_gpu_h": 49.51,
+          "overhead_gpu_h": 1.053,
+          "spot_jobs_served": 478,
+          "resident_resume_penalty_s_mean": 136.83,
+          "resident_resume_penalty_s_total": 2189.4,
+          "idle_reclaimable_h": 59.52,
+          "resident_idle_billed_h": 0.0,
+          "spot_useful_recovered_h": 49.51,
+          "demotes": 31
+        }
+      }
+    },
+    {
+      "load": 0.3,
+      "policies": {
+        "keep-idle": {
+          "policy": "keep-idle",
+          "occupancy": 0.3182,
+          "resident_useful_gpu_h": 122.18,
+          "spot_useful_gpu_h": 0.0,
+          "overhead_gpu_h": 0.0,
+          "spot_jobs_served": 0,
+          "resident_resume_penalty_s_mean": 0.0,
+          "resident_resume_penalty_s_total": 0.0,
+          "idle_reclaimable_h": 18.65,
+          "resident_idle_billed_h": 18.65,
+          "spot_useful_recovered_h": 0.0,
+          "demotes": 0
+        },
+        "cold-preempt": {
+          "policy": "cold-preempt",
+          "occupancy": 0.3667,
+          "resident_useful_gpu_h": 122.18,
+          "spot_useful_gpu_h": 18.65,
+          "overhead_gpu_h": 0.953,
+          "spot_jobs_served": 164,
+          "resident_resume_penalty_s_mean": 214.5,
+          "resident_resume_penalty_s_total": 3432.0,
+          "idle_reclaimable_h": 18.65,
+          "resident_idle_billed_h": 0.0,
+          "spot_useful_recovered_h": 18.65,
+          "demotes": 0
+        },
+        "gshare": {
+          "policy": "gshare",
+          "occupancy": 0.3658,
+          "resident_useful_gpu_h": 122.18,
+          "spot_useful_gpu_h": 18.27,
+          "overhead_gpu_h": 0.453,
+          "spot_jobs_served": 158,
+          "resident_resume_penalty_s_mean": 37.37,
+          "resident_resume_penalty_s_total": 597.9,
+          "idle_reclaimable_h": 18.65,
+          "resident_idle_billed_h": 0.0,
+          "spot_useful_recovered_h": 18.27,
+          "demotes": 5
+        }
+      }
+    },
+    {
+      "load": 0.4,
+      "policies": {
+        "keep-idle": {
+          "policy": "keep-idle",
+          "occupancy": 0.404,
+          "resident_useful_gpu_h": 155.14,
+          "spot_useful_gpu_h": 0.0,
+          "overhead_gpu_h": 0.0,
+          "spot_jobs_served": 0,
+          "resident_resume_penalty_s_mean": 0.0,
+          "resident_resume_penalty_s_total": 0.0,
+          "idle_reclaimable_h": 5.16,
+          "resident_idle_billed_h": 5.16,
+          "spot_useful_recovered_h": 0.0,
+          "demotes": 0
+        },
+        "cold-preempt": {
+          "policy": "cold-preempt",
+          "occupancy": 0.4174,
+          "resident_useful_gpu_h": 155.14,
+          "spot_useful_gpu_h": 5.16,
+          "overhead_gpu_h": 0.345,
+          "spot_jobs_served": 48,
+          "resident_resume_penalty_s_mean": 77.62,
+          "resident_resume_penalty_s_total": 1242.0,
+          "idle_reclaimable_h": 5.16,
+          "resident_idle_billed_h": 0.0,
+          "spot_useful_recovered_h": 5.16,
+          "demotes": 0
+        },
+        "gshare": {
+          "policy": "gshare",
+          "occupancy": 0.4171,
+          "resident_useful_gpu_h": 155.14,
+          "spot_useful_gpu_h": 5.04,
+          "overhead_gpu_h": 0.146,
+          "spot_jobs_served": 43,
+          "resident_resume_penalty_s_mean": 12.0,
+          "resident_resume_penalty_s_total": 192.0,
+          "idle_reclaimable_h": 5.16,
+          "resident_idle_billed_h": 0.0,
+          "spot_useful_recovered_h": 5.04,
+          "demotes": 2
+        }
+      }
+    },
+    {
+      "load": 0.5,
+      "policies": {
+        "keep-idle": {
+          "policy": "keep-idle",
+          "occupancy": 0.4875,
+          "resident_useful_gpu_h": 187.18,
+          "spot_useful_gpu_h": 0.0,
+          "overhead_gpu_h": 0.0,
+          "spot_jobs_served": 0,
+          "resident_resume_penalty_s_mean": 0.0,
+          "resident_resume_penalty_s_total": 0.0,
+          "idle_reclaimable_h": 0.28,
+          "resident_idle_billed_h": 0.28,
+          "spot_useful_recovered_h": 0.0,
+          "demotes": 0
+        },
+        "cold-preempt": {
+          "policy": "cold-preempt",
+          "occupancy": 0.4882,
+          "resident_useful_gpu_h": 187.18,
+          "spot_useful_gpu_h": 0.28,
+          "overhead_gpu_h": 0.012,
+          "spot_jobs_served": 2,
+          "resident_resume_penalty_s_mean": 2.75,
+          "resident_resume_penalty_s_total": 44.0,
+          "idle_reclaimable_h": 0.28,
+          "resident_idle_billed_h": 0.0,
+          "spot_useful_recovered_h": 0.28,
+          "demotes": 0
+        },
+        "gshare": {
+          "policy": "gshare",
+          "occupancy": 0.4882,
+          "resident_useful_gpu_h": 187.18,
+          "spot_useful_gpu_h": 0.28,
+          "overhead_gpu_h": 0.008,
+          "spot_jobs_served": 2,
+          "resident_resume_penalty_s_mean": 0.45,
+          "resident_resume_penalty_s_total": 7.2,
+          "idle_reclaimable_h": 0.28,
+          "resident_idle_billed_h": 0.0,
+          "spot_useful_recovered_h": 0.28,
+          "demotes": 0
+        }
+      }
+    },
+    {
+      "load": 0.65,
+      "policies": {
+        "keep-idle": {
+          "policy": "keep-idle",
+          "occupancy": 0.6478,
+          "resident_useful_gpu_h": 248.77,
+          "spot_useful_gpu_h": 0.0,
+          "overhead_gpu_h": 0.0,
+          "spot_jobs_served": 0,
+          "resident_resume_penalty_s_mean": 0.0,
+          "resident_resume_penalty_s_total": 0.0,
+          "idle_reclaimable_h": 0.0,
+          "resident_idle_billed_h": 0.0,
+          "spot_useful_recovered_h": 0.0,
+          "demotes": 0
+        },
+        "cold-preempt": {
+          "policy": "cold-preempt",
+          "occupancy": 0.6478,
+          "resident_useful_gpu_h": 248.77,
+          "spot_useful_gpu_h": 0.0,
+          "overhead_gpu_h": 0.0,
+          "spot_jobs_served": 0,
+          "resident_resume_penalty_s_mean": 0.0,
+          "resident_resume_penalty_s_total": 0.0,
+          "idle_reclaimable_h": 0.0,
+          "resident_idle_billed_h": 0.0,
+          "spot_useful_recovered_h": 0.0,
+          "demotes": 0
+        },
+        "gshare": {
+          "policy": "gshare",
+          "occupancy": 0.6478,
+          "resident_useful_gpu_h": 248.77,
+          "spot_useful_gpu_h": 0.0,
+          "overhead_gpu_h": 0.0,
+          "spot_jobs_served": 0,
+          "resident_resume_penalty_s_mean": 0.0,
+          "resident_resume_penalty_s_total": 0.0,
+          "idle_reclaimable_h": 0.0,
+          "resident_idle_billed_h": 0.0,
+          "spot_useful_recovered_h": 0.0,
+          "demotes": 0
+        }
+      }
+    },
+    {
+      "load": 0.8,
+      "policies": {
+        "keep-idle": {
+          "policy": "keep-idle",
+          "occupancy": 0.8022,
+          "resident_useful_gpu_h": 308.05,
+          "spot_useful_gpu_h": 0.0,
+          "overhead_gpu_h": 0.0,
+          "spot_jobs_served": 0,
+          "resident_resume_penalty_s_mean": 0.0,
+          "resident_resume_penalty_s_total": 0.0,
+          "idle_reclaimable_h": 0.0,
+          "resident_idle_billed_h": 0.0,
+          "spot_useful_recovered_h": 0.0,
+          "demotes": 0
+        },
+        "cold-preempt": {
+          "policy": "cold-preempt",
+          "occupancy": 0.8022,
+          "resident_useful_gpu_h": 308.05,
+          "spot_useful_gpu_h": 0.0,
+          "overhead_gpu_h": 0.0,
+          "spot_jobs_served": 0,
+          "resident_resume_penalty_s_mean": 0.0,
+          "resident_resume_penalty_s_total": 0.0,
+          "idle_reclaimable_h": 0.0,
+          "resident_idle_billed_h": 0.0,
+          "spot_useful_recovered_h": 0.0,
+          "demotes": 0
+        },
+        "gshare": {
+          "policy": "gshare",
+          "occupancy": 0.8022,
+          "resident_useful_gpu_h": 308.05,
+          "spot_useful_gpu_h": 0.0,
+          "overhead_gpu_h": 0.0,
+          "spot_jobs_served": 0,
+          "resident_resume_penalty_s_mean": 0.0,
+          "resident_resume_penalty_s_total": 0.0,
+          "idle_reclaimable_h": 0.0,
+          "resident_idle_billed_h": 0.0,
+          "spot_useful_recovered_h": 0.0,
+          "demotes": 0
+        }
+      }
+    }
+  ]
+}

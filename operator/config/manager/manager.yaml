@@ -1,0 +1,7 @@
+# Operator namespace.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: gshare-system
+  labels:
+    app.kubernetes.io/name: gshare-operator

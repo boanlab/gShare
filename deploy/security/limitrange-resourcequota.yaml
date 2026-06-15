@@ -1,0 +1,39 @@
+# LimitRange + ResourceQuota.
+# The sessions namespace gets per-pod defaults and ceilings plus a tenant-wide total; the build
+# namespace gets a global Kaniko quota, so a runaway build cannot take the cluster with it.
+---
+apiVersion: v1
+kind: LimitRange
+metadata:
+  name: session-limits
+  namespace: gshare-sessions
+spec:
+  limits:
+    - type: Container
+      default: { cpu: "2", memory: 4Gi }
+      defaultRequest: { cpu: 500m, memory: 1Gi }
+      max: { cpu: "16", memory: 64Gi }
+---
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: tenant-quota
+  namespace: gshare-sessions
+spec:
+  hard:
+    requests.nvidia.com/gpu: "8"             # per-tenant ceiling on concurrent exclusive GPUs
+    requests.cpu: "64"
+    requests.memory: 256Gi
+    count/pods: "100"
+---
+# Global Kaniko quota: caps concurrent build Jobs and CPU in the gshare-build namespace.
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: build-quota
+  namespace: gshare-build
+spec:
+  hard:
+    count/jobs.batch: "5"
+    requests.cpu: "20"
+    requests.memory: 40Gi

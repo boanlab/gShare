@@ -1,0 +1,40 @@
+# Sample GShareSession resources for testing the operator end to end, from custom resource to pod.
+# In production the Python control plane applies these; here they are applied directly so the operator
+# can be exercised on its own.
+# The images are public ones that any environment can pull, rather than the registry.gshare.internal
+# references a real deployment would use.
+---
+# A free CPU session on a node-type=cpu node, requesting no GPU, so it is the most reliable to run.
+apiVersion: gshare.io/v1
+kind: GShareSession
+metadata:
+  name: t-cpu
+  namespace: gshare-sessions
+spec:
+  clusterId: clu_fake
+  resourceClass: cpu
+  image: nginxinc/nginx-unprivileged:alpine
+  offeringId: off_cpu_free
+  clusterMode: single
+  billingWalletId: wal_demo
+  owner: usr_demo
+  projectId: prj_demo
+---
+# An exclusive GPU session on a gshare.io/gpu-mode=exclusive node, requesting nvidia.com/gpu: 1.
+# The podbuilder's toleration lets it land on a node tainted gshare.io/gpu. The image runs non-root
+# and long-lived.
+apiVersion: gshare.io/v1
+kind: GShareSession
+metadata:
+  name: t-excl
+  namespace: gshare-sessions
+spec:
+  clusterId: clu_fake
+  resourceClass: gpu
+  mode: exclusive
+  image: nginxinc/nginx-unprivileged:alpine
+  offeringId: off_exclusive
+  clusterMode: single
+  billingWalletId: wal_demo
+  owner: usr_demo
+  projectId: prj_demo

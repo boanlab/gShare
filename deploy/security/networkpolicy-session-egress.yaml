@@ -1,0 +1,57 @@
+# Egress allowlist for session pods.
+#
+# GPU and general sessions may reach DNS and storage (NFS, CephFS) only. CPU data-prep sessions may
+# reach DNS and the dataset mirror or object store only.
+#
+# A session never calls the control plane directly — the operator reports status on its behalf — and
+# general internet egress is denied.
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: session-egress-allow
+  namespace: gshare-sessions
+spec:
+  podSelector:
+    matchLabels: { gshare.io/workload: session }
+  policyTypes: ["Egress"]
+  egress:
+    - to:                               # kube-dns
+        - namespaceSelector:
+            matchLabels: { kubernetes.io/metadata.name: kube-system }
+          podSelector:
+            matchLabels: { k8s-app: kube-dns }
+      ports:
+        - { protocol: UDP, port: 53 }
+        - { protocol: TCP, port: 53 }
+    - to:                               # the NFS and CephFS CSI, on the storage subnet
+        - ipBlock: { cidr: 10.20.0.0/16 }
+      ports:
+        - { protocol: TCP, port: 2049 }   # NFS
+        - { protocol: TCP, port: 6789 }   # CephFS (mon)
+---
+# Egress for CPU data-prep sessions: the dataset mirror and object store only; no general internet.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: cpu-data-egress-allow
+  namespace: gshare-sessions
+spec:
+  podSelector:
+    matchLabels:
+      gshare.io/workload: session
+      gshare.io/resource-class: cpu
+  policyTypes: ["Egress"]
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels: { kubernetes.io/metadata.name: kube-system }
+          podSelector:
+            matchLabels: { k8s-app: kube-dns }
+      ports:
+        - { protocol: UDP, port: 53 }
+    - to:
+        - ipBlock: { cidr: 10.30.0.0/16 }   # dataset mirror and object store subnet
+      ports:
+        - { protocol: TCP, port: 443 }
+    # Nothing else is permitted, which blocks arbitrary downloads and exfiltration.

@@ -1,0 +1,68 @@
+[project]
+name = "gshare-backend"
+version = "1.0.0"
+description = "GShare — Python control API / domain plane (hybrid backend)"
+requires-python = ">=3.12"
+readme = "README.md"
+
+# Stack: FastAPI + SQLAlchemy 2.x + Alembic + Redis + pydantic v2 + httpx.
+dependencies = [
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.32",
+    "sqlalchemy[asyncio]>=2.0",
+    "asyncpg>=0.30",
+    "alembic>=1.14",
+    "redis>=5.2",
+    "pydantic>=2.9",
+    "pydantic-settings>=2.6",
+    "httpx>=0.28",
+    "python-jose[cryptography]>=3.3",   # RS256 verify/sign (internal JWT)
+    "python-ulid>=2.7",                 # prefixed ULID id generator
+    "kubernetes-asyncio>=31.1",         # CRD-primary GShareSession apply only (no workload K8s calls)
+    "sse-starlette>=2.1",               # SSE for /sessions/{id}/events
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.3",
+    "pytest-asyncio>=0.24",
+    "pytest-cov>=5.0",
+    "aiosqlite>=0.20",                  # in-memory SQLite for domain-logic tests (see conftest)
+    "fakeredis>=2.20",                  # exercises the idempotency and queue paths without a real Redis
+    "testcontainers[postgres,redis]>=4.8",
+    "ruff>=0.8",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["app"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+ignore = [
+    "B008",   # FastAPI Depends() in a default argument is idiomatic
+    # Line length is a formatting convention here, not a gate. `line-length` above still drives
+    # `ruff format`, and prose (comments and docstrings) is kept within it, but a fair amount of
+    # existing code — notably the tabular catalogue seed data — deliberately runs wider.
+    "E501",
+]
+
+[tool.ruff.lint.per-file-ignores]
+# Imports deliberately follow the definitions they depend on, to keep the module import graph acyclic.
+"app/main.py" = ["E402"]
+"app/api/credits_router.py" = ["E402"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+addopts = "-ra"
+markers = [
+    "realgpu: end-to-end tests that need a real GPU cluster; exclude them with -m 'not realgpu'",
+]

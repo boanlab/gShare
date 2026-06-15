@@ -1,0 +1,260 @@
+# RBAC, least privilege throughout: no wildcard verbs, no blanket access to secrets, no year-long
+# tokens.
+#
+# Two service accounts: gshare-controller (used by api and worker, for custom-resource writes and
+# session lifecycle) and gshare-operator (the in-cluster reconciler).
+#
+# This template covers the cluster the chart is installed into, where the control plane may live
+# alongside. For a remote target cluster, see the namespace-scoped roles in
+# deploy/security/rbac-onboarding-scoped.yaml.
+
+# ── ServiceAccounts ──
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ .Values.serviceAccounts.controller }}
+  namespace: {{ .Values.global.namespaces.system }}
+  labels:
+    {{- include "gshare.labels" . | nindent 4 }}
+automountServiceAccountToken: false       # tokens are issued through TokenRequest only
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ .Values.serviceAccounts.operator }}
+  namespace: {{ .Values.global.namespaces.system }}
+  labels:
+    {{- include "gshare.labels" . | nindent 4 }}
+---
+# Service account for the privileged lossless-pause workloads (checkpoint Jobs and restore pods) in
+# gshare-infra, which runs under privileged Pod Security. They make no Kubernetes API calls —
+# cuda-checkpoint and CRIU work through host privileges — so the account needs no RBAC at all.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: gshare-lossless-agent
+  namespace: {{ .Values.global.namespaces.infra }}
+  labels:
+    {{- include "gshare.labels" . | nindent 4 }}
+---
+# ── (A) Cluster scope: read-only inventory plus the cordon patch. No secrets, no exec, no writes. ──
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: gshare-controller-inventory
+  labels:
+    {{- include "gshare.labels" . | nindent 4 }}
+rules:
+  - apiGroups: [""]
+    resources: ["nodes"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["namespaces"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["node.k8s.io"]
+    resources: ["runtimeclasses"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["apps"]
+    resources: ["daemonsets"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["nodes"]
+    verbs: ["patch"]                        # cordon (unschedulable) only
+  - apiGroups: ["batch"]
+    resources: ["jobs"]                     # lossless pause: the privileged agent Job (checkpoint and restore)
+    verbs: ["get", "list", "watch", "create", "delete"]
+  - apiGroups: [""]
+    resources: ["pods"]                     # lossless pause: creating and managing restore pods in gshare-infra
+    verbs: ["get", "list", "watch", "create", "delete"]
+  - apiGroups: ["admissionregistration.k8s.io"]
+    resources: ["validatingwebhookconfigurations"]   # lend-guard: injecting its own caBundle
+    verbs: ["get", "list", "watch", "update"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: gshare-controller-inventory
+  labels:
+    {{- include "gshare.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: gshare-controller-inventory
+subjects:
+  - kind: ServiceAccount
+    name: {{ .Values.serviceAccounts.controller }}
+    namespace: {{ .Values.global.namespaces.system }}
+  - kind: ServiceAccount
+    name: {{ .Values.serviceAccounts.operator }}
+    namespace: {{ .Values.global.namespaces.system }}
+---
+# ── (B) Session lifecycle: a Role confined to the gshare-sessions namespace, which keeps every
+#        write inside it. ──
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: gshare-session-manager
+  namespace: {{ .Values.global.namespaces.sessions }}
+  labels:
+    {{- include "gshare.labels" . | nindent 4 }}
+rules:
+  - apiGroups: [""]
+    resources: ["pods", "services", "configmaps", "persistentvolumeclaims"]
+    verbs: ["create", "get", "list", "watch", "delete"]
+  - apiGroups: ["networking.k8s.io"]
+    resources: ["ingresses"]
+    verbs: ["create", "get", "list", "watch", "delete"]
+  - apiGroups: [""]
+    resources: ["secrets"]                  # the per-session ses-<id>-secret only
+    verbs: ["create", "get", "delete"]      # no list, watch, or update, and no wildcard
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: gshare-session-manager
+  namespace: {{ .Values.global.namespaces.sessions }}
+  labels:
+    {{- include "gshare.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: gshare-session-manager
+subjects:
+  - kind: ServiceAccount
+    name: {{ .Values.serviceAccounts.operator }}
+    namespace: {{ .Values.global.namespaces.system }}
+---
+# ── Writing GShareSession resources, confined to gshare-sessions. This is the CRD-primary handoff. ──
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: gshare-session-cr-writer
+  namespace: {{ .Values.global.namespaces.sessions }}
+  labels:
+    {{- include "gshare.labels" . | nindent 4 }}
+rules:
+  - apiGroups: ["gshare.io"]
+    resources: ["gsharesessions"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["gshare.io"]
+    resources: ["gsharesessions/status"]
+    verbs: ["get"]                          # read status only; the ledger is written back by the status callback
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: gshare-session-cr-writer
+  namespace: {{ .Values.global.namespaces.sessions }}
+  labels:
+    {{- include "gshare.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: gshare-session-cr-writer
+subjects:
+  - kind: ServiceAccount                    # the Python control plane applying custom resources
+    name: {{ .Values.serviceAccounts.controller }}
+    namespace: {{ .Values.global.namespaces.system }}
+---
+# ── operator: writing GShareSession resources and their status, to report reconcile results ──
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: gshare-operator-cr
+  namespace: {{ .Values.global.namespaces.sessions }}
+  labels:
+    {{- include "gshare.labels" . | nindent 4 }}
+rules:
+  - apiGroups: ["gshare.io"]
+    resources: ["gsharesessions"]
+    verbs: ["get", "list", "watch", "update", "patch"]
+  - apiGroups: ["gshare.io"]
+    resources: ["gsharesessions/status", "gsharesessions/finalizers"]
+    verbs: ["get", "update", "patch"]
+  - apiGroups: ["coordination.k8s.io"]
+    resources: ["leases"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: gshare-operator-cr
+  namespace: {{ .Values.global.namespaces.sessions }}
+  labels:
+    {{- include "gshare.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: gshare-operator-cr
+subjects:
+  - kind: ServiceAccount
+    name: {{ .Values.serviceAccounts.operator }}
+    namespace: {{ .Values.global.namespaces.system }}
+---
+# ── Leader election ── controller-runtime creates and acquires its leader lease in the operator's
+# own namespace (gshare-system), so the leases and events permissions belong to a Role there.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: gshare-operator-leaderelection
+  namespace: {{ .Values.global.namespaces.system }}
+  labels:
+    {{- include "gshare.labels" . | nindent 4 }}
+rules:
+  - apiGroups: ["coordination.k8s.io"]
+    resources: ["leases"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["create", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: gshare-operator-leaderelection
+  namespace: {{ .Values.global.namespaces.system }}
+  labels:
+    {{- include "gshare.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: gshare-operator-leaderelection
+subjects:
+  - kind: ServiceAccount
+    name: {{ .Values.serviceAccounts.operator }}
+    namespace: {{ .Values.global.namespaces.system }}
+---
+# ── Manager cache reads ── The controller-runtime manager lists and watches its types cluster-wide,
+# so get, list, and watch have to be cluster-scoped. Writes (create and delete) stay confined to the
+# namespace-scoped gshare-sessions Role above.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: gshare-operator-watch
+  labels:
+    {{- include "gshare.labels" . | nindent 4 }}
+rules:
+  - apiGroups: [""]
+    resources: ["pods", "services", "secrets"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["networking.k8s.io"]
+    resources: ["ingresses"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["gshare.io"]
+    resources: ["gsharesessions", "gsharesessions/status"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: gshare-operator-watch
+  labels:
+    {{- include "gshare.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: gshare-operator-watch
+subjects:
+  - kind: ServiceAccount
+    name: {{ .Values.serviceAccounts.operator }}
+    namespace: {{ .Values.global.namespaces.system }}

@@ -1,0 +1,13 @@
+# Keep the build context small, and stop the host's node_modules and bundle from being copied in and
+# overwriting what npm ci installed.
+node_modules/
+dist/
+dist-ssr/
+.vite/
+*.local
+*.tsbuildinfo
+npm-debug.log*
+.env
+.env.*
+!.env.example
+Makefile

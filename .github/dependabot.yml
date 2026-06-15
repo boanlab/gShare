@@ -1,0 +1,51 @@
+version: 2
+
+updates:
+  - package-ecosystem: pip
+    directory: /backend
+    schedule: { interval: weekly, day: monday }
+    open-pull-requests-limit: 5
+    labels: [dependencies, backend]
+    groups:
+      backend-minor:
+        update-types: [minor, patch]
+
+  - package-ecosystem: gomod
+    directory: /operator
+    schedule: { interval: weekly, day: monday }
+    open-pull-requests-limit: 5
+    labels: [dependencies, operator]
+    groups:
+      # Kubernetes libraries only work in lockstep; upgrade them as one PR.
+      kubernetes:
+        patterns: ["k8s.io/*", "sigs.k8s.io/*"]
+      operator-minor:
+        update-types: [minor, patch]
+
+  - package-ecosystem: npm
+    directory: /frontend
+    schedule: { interval: weekly, day: monday }
+    open-pull-requests-limit: 5
+    labels: [dependencies, frontend]
+    groups:
+      frontend-minor:
+        update-types: [minor, patch]
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule: { interval: weekly, day: monday }
+    labels: [dependencies, ci]
+    groups:
+      actions:
+        patterns: ["*"]
+
+  - package-ecosystem: docker
+    directories:
+      - /backend
+      - /frontend
+      - /operator
+      - /build/images/ml
+      - /build/images/session-base
+      - /build/images/lossless-agent
+    schedule: { interval: weekly, day: monday }
+    labels: [dependencies, images]

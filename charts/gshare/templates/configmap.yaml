@@ -1,0 +1,35 @@
+{{- if .Values.controlPlane.enabled }}
+# Shared configuration: the non-secret runtime settings. Secrets come from external-secrets; see
+# deploy/secrets.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: gshare-config
+  namespace: {{ .Values.global.namespaces.system }}
+  labels:
+    {{- include "gshare.labels" . | nindent 4 }}
+data:
+  # Session connect URLs are {scheme}://{console domain}/proxy/{cr}/..., path-based and matching the
+  # operator's --session-domain. SESSION_DOMAIN is the console domain. The app reads only
+  # GSHARE_-prefixed variables (pydantic env_prefix).
+  GSHARE_SESSION_DOMAIN: {{ .Values.global.domains.console | quote }}
+  GSHARE_SESSION_URL_SCHEME: "https"
+  # Redis connection, derived from values.redis. Shared by api and worker for the queue, locks,
+  # connect tokens, and idempotency.
+  GSHARE_REDIS_URL: "redis://{{ .Values.redis.host }}:{{ .Values.redis.port }}/0"
+  # JWKS used to verify the internal RS256 JWT. The api fetches it from itself when verifying an
+  # operator callback. The default (api.gshare.internal) does not resolve inside the cluster, so it
+  # must be overridden with the in-cluster service URL.
+  GSHARE_INTERNAL_JWKS_URL: "http://api.{{ .Values.global.namespaces.system }}.svc.cluster.local/.well-known/gshare-internal-jwks.json"
+  # The bootstrap super_admin. Its password lives in the gshare-bootstrap-admin secret, mounted by
+  # the api deployment.
+  GSHARE_BOOTSTRAP_ADMIN_EMAIL: {{ .Values.bootstrapAdmin.email | quote }}
+  # Automatic registration of the local cluster in an all-in-one install. The id must equal
+  # operator.clusterId, or the inventory foreign keys will not line up.
+  GSHARE_BOOTSTRAP_LOCAL_CLUSTER: {{ .Values.bootstrapLocalCluster | quote }}
+  GSHARE_LOCAL_CLUSTER_ID: {{ .Values.operator.clusterId | quote }}
+  # Fractional borrowing. Toggle it together with operator.hamiYieldExtender; only the HAMi extender
+  # path can borrow fractionally.
+  GSHARE_YIELD_FRACTIONAL_BORROW: {{ .Values.operator.hamiYieldExtender | quote }}
+
+{{- end }}

@@ -1,0 +1,46 @@
+[DATE]
+
+To the Editors,
+Future Generation Computer Systems
+
+Dear Editors,
+
+We submit our manuscript, "GShare: Lossless Preemptible Sharing of Exclusive GPUs via an
+Occupancy Memory Hierarchy," for consideration as a regular research article in Future
+Generation Computer Systems.
+
+Multi-tenant GPU clusters bill tenants for occupying a card rather than for using it, and on
+Kubernetes a card's occupancy is bound to the lifetime of the pod that holds it. This coupling
+forces a lossy choice: keep paying for an idle exclusive card, or stop the pod and lose the
+workload's in-GPU state. Existing approaches do not close this gap -- space-sharing cannot give
+any job a full card under SM saturation, and the Kubernetes-native checkpoint/restore path cannot
+resume a GPU losslessly because the restored checkpoint must re-enter a kubelet-owned sandbox
+network namespace that is destroyed with the pod.
+
+Our central idea is to model GPU occupancy as a position in a memory hierarchy -- VRAM, host RAM,
+disk/NVMe, and a durable cold tier -- through which a session's working set moves losslessly, with
+demotion/promotion as the inter-tier paging policy. By keeping the pod alive, GShare sidesteps the
+Kubernetes restore wall and delivers a capability space-sharing structurally cannot: lossless,
+application-transparent, preemptible sharing of exclusive GPU cards on the native stack. We build
+GShare on a production GPU Kubernetes stack and validate every tier and transition on RTX-4090
+hardware, including a measured lossless disk-tier round-trip, real two-node multi-tenant
+yield/borrow/reclaim, a cross-validated cluster simulator, and a real-trace-grounded analysis that
+we deliberately report as an honest bound rather than a single inflated figure.
+
+We believe this work fits FGCS's scope in cloud and distributed resource management, virtualization,
+and multi-tenant infrastructure. Its contribution is a systems one -- an abstraction (occupancy as a
+memory hierarchy), the architecture and economic/paging policy built on it, and a real, thoroughly
+measured implementation -- and we have taken care throughout to bound claims to what the
+measurements support.
+
+We confirm that this manuscript is original, has not been published previously, and is not under
+consideration for publication elsewhere. All authors have read and approved the submission and have
+no conflicts of interest to declare. A reproducibility artifact (scripts, raw data, and figure
+sources) accompanies the paper.
+
+Thank you for your consideration.
+
+Sincerely,
+[CORRESPONDING AUTHOR NAME], on behalf of all authors
+[AFFILIATION]
+[EMAIL]

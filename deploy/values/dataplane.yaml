@@ -1,0 +1,48 @@
+# Data-plane-only values. The control plane runs elsewhere — under Docker Compose, say, via
+# `make compose-up` — and this cluster is a remote GPU cluster it drives through a registered
+# kubeconfig.
+#
+# This overlay deploys only the operator, CRDs, namespaces, RBAC, and optionally the webhook; api,
+# worker, frontend, the data tier, and the secrets are left out.
+#
+#   Deploy: make deploy-dataplane CLUSTER_ID=clu_... CONTROL_PLANE_URL=http://<compose-host>:8080
+#   Requires: the cluster set up with `cluster-bootstrap.sh up` (GPU, HAMi, CRIU nodes), and this
+#             cluster registered with the control plane by kubeconfig, so the api can apply
+#             GShareSession resources to it. See docs/getting-started.md.
+global:
+  imageRegistry: docker.io/boanlab
+  imagePullSecrets: []          # the images are public
+  domains:
+    # The operator's --session-domain is this cluster's session ingress domain, serving /proxy/{cr}.
+    # It may differ from the console domain. Override it with domain.yaml or
+    # --set global.domains.console=...
+    console: gshare.example.com
+
+images:
+  operator: { repository: gshare-operator, tag: "latest", pullPolicy: IfNotPresent }
+
+# The control plane (api, worker, frontend, data tier, secrets) lives elsewhere and is not deployed
+# here.
+controlPlane:
+  enabled: false
+
+# Only what the data plane needs.
+createNamespaces: true          # gshare-system / gshare-sessions / gshare-infra
+postgres:  { inCluster: false }
+redis:     { inCluster: false }
+secrets:   { generate: false }  # the external control plane signs the internal JWT; `make deploy-dataplane` injects it
+ingress:   { enabled: false }   # no console ingress here; the operator creates session ingresses itself
+bootstrapLocalCluster: false
+
+operator:
+  # clusterId and controlPlaneUrl differ per cluster and are injected with --set by
+  # `make deploy-dataplane`.
+  # The idle reaper reads utilisation from the stock HAMi vGPU monitor that cluster-bootstrap
+  # installs, so no Prometheus is required.
+  hamiMonitorUrl: "http://hami-device-plugin-monitor.kube-system.svc:31992"
+  # Node agent for in-place yield and borrowing; a node that does not qualify falls back to cold.
+  losslessAgentImage: docker.io/boanlab/gshare-lossless-agent:latest
+  # The lend-guard ValidatingWebhook, so the borrow invariants are enforced at admission on a remote
+  # cluster too.
+  webhook:
+    enabled: true

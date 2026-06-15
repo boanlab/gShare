@@ -1,0 +1,136 @@
+# gshare-operator — Go, one per cluster, leader-elected. It reconciles GShareSession resources.
+# It is a token holder only: it never has the private key, and its internal JWT is verified against
+# the JWKS.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: gshare-operator
+  namespace: {{ .Values.global.namespaces.system }}
+  labels:
+    {{- include "gshare.labels" . | nindent 4 }}
+    app.kubernetes.io/name: gshare-operator
+spec:
+  replicas: {{ .Values.operator.replicas }}
+  selector:
+    matchLabels:
+      {{- include "gshare.selectorLabels" (dict "component" "gshare-operator") | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "gshare.labels" . | nindent 8 }}
+        {{- include "gshare.selectorLabels" (dict "component" "gshare-operator") | nindent 8 }}
+    spec:
+      serviceAccountName: {{ .Values.serviceAccounts.operator }}
+      # The operator needs its service account token to reconcile in-cluster, so automounting stays
+      # on — unlike the tenant session pods.
+      automountServiceAccountToken: true
+      {{- include "gshare.imagePullSecrets" . | nindent 6 }}
+      securityContext:
+        {{- include "gshare.podSecurityContext" . | nindent 8 }}
+      containers:
+        - name: operator
+          image: {{ include "gshare.image" (dict "img" .Values.images.operator "root" $) }}
+          imagePullPolicy: {{ .Values.images.operator.pullPolicy }}
+          securityContext:
+            {{- include "gshare.containerSecurityContext" . | nindent 12 }}
+          command: ["/manager"]
+          # Everything is passed as a flag; the names match cmd/main.go.
+          args:
+            - "--leader-elect"
+            # Namespace the session children live in (--session-namespace, env SESSION_NAMESPACE).
+            - "--session-namespace={{ .Values.global.namespaces.sessions }}"
+            # Session ingress: one domain, path-based, on the console host at /proxy/{cr}, with
+            # forward-auth for the connect token. session-domain is the console domain. The auth-url
+            # has to be a fully qualified name (.svc.cluster.local); the nginx resolver cannot look
+            # up a short one.
+            # The internal plane (/internal/*, /.well-known) is served by the api's uvicorn. The
+            # frontend nginx proxies only /api/, so it never reaches the public ingress.
+            - "--session-domain={{ .Values.global.domains.console }}"
+            # Control-plane base URL: controlPlaneUrl when set (an external one, under Docker
+            # Compose for instance), otherwise the in-cluster api service.
+            {{- $cp := .Values.operator.controlPlaneUrl | default (printf "http://api.%s.svc.cluster.local" .Values.global.namespaces.system) }}
+            - "--connect-verify-url={{ $cp }}/internal/connect/verify"
+            # Base URL for the status and audit callbacks the operator makes into the control plane's
+            # internal plane; the operator appends the paths. Left empty, BaseURL becomes "" and every
+            # callback fails.
+            - "--sot-endpoint={{ $cp }}"
+            # JWKS for verifying the internal JWT. The operator only verifies; it holds no private key.
+            - "--internal-jwks-url={{ .Values.operator.internalJwksUrl }}"
+            # Cluster identifier: it names the leader lease (gshare-operator.<id>) and tags the
+            # inventory and status callbacks. An empty value makes the lease name invalid.
+            - "--cluster-id={{ .Values.operator.clusterId }}"
+            {{- with .Values.operator.losslessAgentImage }}
+            # Node agent image for lossless pause and in-place yield. Empty disables the checkpointer,
+            # and pause falls back to cold.
+            - "--lossless-agent-image={{ . }}"
+            {{- end }}
+            {{- with .Values.operator.hamiMonitorUrl }}
+            # Where the idle reaper reads per-GPU utilisation: HAMi's vGPU monitor, which stock HAMi
+            # already runs, so no Prometheus is required. Activity-based and workload-aware, and it
+            # takes precedence over prometheus-url.
+            - "--hami-monitor-url={{ . }}"
+            {{- end }}
+            {{- with .Values.operator.prometheusUrl }}
+            # The alternative utilisation source: DCGM_FI_DEV_GPU_UTIL from Prometheus, used when
+            # hami-monitor-url is unset.
+            - "--prometheus-url={{ . }}"
+            {{- end }}
+            {{- if .Values.operator.webhook.enabled }}
+            # The lend-guard ValidatingWebhook enforces the borrow invariants at admission, as a
+            # layer above the ledger.
+            - "--webhook-enabled"
+            - "--system-namespace={{ .Values.global.namespaces.system }}"
+            {{- end }}
+            {{- if .Values.operator.hamiYieldExtender }}
+            # Route borrows through the GShare-patched HAMi extender, which supports fractional
+            # borrowing with proper accounting. Off, borrows use the device-plugin bypass and are
+            # exclusive only.
+            - "--hami-yield-extender"
+            {{- end }}
+          env:
+            # Short-lived internal JWT (RS256, aud=gshare-internal) authenticating the callbacks. The
+            # operator is a token holder and never sees the private key. With secrets.generate=true a
+            # chart hook Job and CronJob sign and rotate it (see operator-token.yaml); in production
+            # external-secrets injects it under the same name and key (internal-jwt).
+            - name: INTERNAL_JWT_TOKEN_FILE
+              value: /var/run/gshare/internal-jwt
+          # The ports match the operator's flag defaults, neither of which is overridden: metrics on
+          # :8080 (plain HTTP) and healthz on :8081.
+          ports:
+            - { name: metrics, containerPort: 8080 }
+            - { name: healthz, containerPort: 8081 }
+            {{- if .Values.operator.webhook.enabled }}
+            - { name: webhook, containerPort: 9443 }
+            {{- end }}
+          readinessProbe:
+            httpGet: { path: /readyz, port: healthz }
+            initialDelaySeconds: 5
+          livenessProbe:
+            httpGet: { path: /healthz, port: healthz }
+            initialDelaySeconds: 15
+          resources:
+            {{- toYaml .Values.operator.resources | nindent 12 }}
+          volumeMounts:
+            # The internal JWT: key internal-jwt, projected to /var/run/gshare/internal-jwt. Marked
+            # optional so the operator still starts if it comes up before the post-install hook has
+            # created the secret; once kubelet syncs it, the next reconcile's callback succeeds.
+            - name: internal-jwt
+              mountPath: /var/run/gshare
+              readOnly: true
+            {{- if .Values.operator.webhook.enabled }}
+            # Writable space for the webhook's self-signed serving certificate. The root filesystem is
+            # read-only, so this needs its own emptyDir, at the operator's default --webhook-cert-dir.
+            - name: webhook-certs
+              mountPath: /tmp/gshare-webhook-certs
+            {{- end }}
+      volumes:
+        - name: internal-jwt
+          secret:
+            secretName: {{ .Values.operator.internalJwtSecret }}
+            optional: true
+            items:
+              - { key: internal-jwt, path: internal-jwt }
+        {{- if .Values.operator.webhook.enabled }}
+        - name: webhook-certs
+          emptyDir: {}
+        {{- end }}

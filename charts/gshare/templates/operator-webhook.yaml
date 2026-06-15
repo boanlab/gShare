@@ -1,0 +1,49 @@
+{{- if .Values.operator.webhook.enabled }}
+# Pod lend-guard ValidatingWebhook — enforces the borrow lend-invariant at admission
+# (defense-in-depth over the backend ledger). The operator self-generates the serving cert
+# and injects the caBundle below at startup (no cert-manager dependency). failurePolicy=Ignore
+# keeps the cluster available if the webhook is down (the ledger remains primary).
+apiVersion: v1
+kind: Service
+metadata:
+  name: gshare-webhook
+  namespace: {{ .Values.global.namespaces.system }}
+  labels:
+    {{- include "gshare.labels" . | nindent 4 }}
+    app.kubernetes.io/name: gshare-webhook
+spec:
+  selector:
+    {{- include "gshare.selectorLabels" (dict "component" "gshare-operator") | nindent 4 }}
+  ports:
+    - port: 443
+      targetPort: webhook
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingWebhookConfiguration
+metadata:
+  name: gshare-pod-lend-guard
+  labels:
+    {{- include "gshare.labels" . | nindent 4 }}
+webhooks:
+  - name: pods.lend-guard.gshare.io
+    admissionReviewVersions: ["v1"]
+    sideEffects: None
+    failurePolicy: Ignore                 # ledger is primary; never block the cluster on webhook outage
+    timeoutSeconds: 5
+    # caBundle intentionally omitted — the operator injects it on startup (self-signed serving cert).
+    clientConfig:
+      service:
+        name: gshare-webhook
+        namespace: {{ .Values.global.namespaces.system }}
+        path: /validate-pod
+        port: 443
+    rules:
+      - operations: ["CREATE"]
+        apiGroups: [""]
+        apiVersions: ["v1"]
+        resources: ["pods"]
+        scope: Namespaced
+    namespaceSelector:
+      matchLabels:
+        kubernetes.io/metadata.name: {{ .Values.global.namespaces.sessions }}
+{{- end }}

@@ -1,0 +1,16 @@
+{{- if .Values.controlPlane.enabled }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: frontend
+  namespace: {{ .Values.global.namespaces.system }}
+  labels:
+    {{- include "gshare.labels" . | nindent 4 }}
+    app.kubernetes.io/name: gshare-frontend
+spec:
+  selector:
+    {{- include "gshare.selectorLabels" (dict "component" "gshare-frontend") | nindent 4 }}
+  ports:
+    - { name: http, port: 80, targetPort: http }
+
+{{- end }}

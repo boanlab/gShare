@@ -1,0 +1,122 @@
+"""Session request/response schemas.
+
+There is **no** ``session_type`` / ``batch_command`` — sessions are interactive only.
+``cluster_mode=single|multi`` is the only mode axis.
+"""
+from __future__ import annotations
+
+from datetime import datetime
+from typing import Any
+
+from pydantic import BaseModel, ConfigDict, Field
+
+from app.api.schemas.common import ORMModel, PageMetaNoPages
+
+
+class VolumeMountSpec(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    volume_id: str
+    mount_path: str
+    mode: str = Field(default="rw", pattern="^(ro|rw)$")
+
+
+class SessionCreate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    name: str | None = None                           # optional user-chosen display name
+    offering_id: str
+    image_id: str
+    resource_class: str = Field(pattern="^(gpu|cpu)$")
+    cluster_id: str | None = None                     # unset means _resolve_cluster picks an available cluster
+    cluster_mode: str = Field(default="single", pattern="^(single|multi)$")
+    group_id: str | None = None
+    gpu_mem_mb: int | None = Field(default=None, ge=0)  # required for gpu class
+    gpu_cores: int | None = Field(default=None, ge=0, le=100)
+    # Compute (cpu, mem, disk). When set, these override the offering defaults, as a compute preset.
+    cpu: int | None = Field(default=None, ge=0)
+    mem_gb: int | None = Field(default=None, ge=0)
+    disk_gb: int | None = Field(default=None, ge=0)
+    # MIG is unsupported: only fractional (shared) and exclusive are allowed, and mode=mig is 422.
+    mode: str | None = Field(default=None, pattern="^(fractional|exclusive)$")
+    billing_wallet_id: str | None = None              # NULL allowed for cpu (free)
+    # Spot (preemptible) session: with no normal capacity free, it is admitted by borrowing a card a
+    # resident yielded, and is reclaimed when that resident returns. Exclusive only.
+    # (See docs/paper/manuscript, §Design.)
+    preemptible: bool = False
+    # Scheduling priority, higher wins. With no capacity free, a request can actively preempt a
+    # lower-priority yieldable session.
+    priority: int = Field(default=0, ge=0)
+    volume_mounts: list[VolumeMountSpec] = []
+
+
+class SessionRead(ORMModel):
+    id: str
+    name: str | None = None
+    status: str            # pending|preparing|running|paused|terminating|terminated|error
+    occupancy: float | None = None   # max(mem/total, cores/100)
+    bound_gpu_uuid: str | None = None
+    cluster_id: str
+    group_id: str | None = None            # the session's group, shown in monitoring
+    group_name: str | None = None          # group name, shown in monitoring
+    org_id: str | None = None              # organization, derived from the group
+    org_name: str | None = None            # organization name, shown in monitoring
+    resource_class: str
+    mode: str | None = None
+    gpu_mem_mb: int | None = None
+    gpu_cores: int | None = None
+    owner_user_id: str | None = None
+    owner_name: str | None = None          # owner name, shown in the administrators' monitoring view
+    # For the cost and uptime columns: the rate snapshot plus the start and end timestamps.
+    credit_per_hour_snapshot: float | None = None
+    started_at: datetime | None = None
+    terminated_at: datetime | None = None
+    created_at: datetime | None = None
+
+
+class PreviewCostRequest(SessionCreate):
+    pass
+
+
+class PreviewCostResponse(BaseModel):
+    estimated_credit_per_hour: float
+    occupancy: float
+    hold_amount: float
+
+
+class BulkTerminateRequest(BaseModel):
+    session_ids: list[str]
+    reason: str | None = None
+
+
+class ConnectionInfo(BaseModel):
+    kind: str          # vscode|jupyter|webapp
+    url: str
+    connection_token: str   # one-time cnx_ token
+    expires_at: datetime | None = None   # token expiry: now plus CONNECTION_TOKEN_TTL_SEC
+    command: str | None = None           # optional command line shown as connect guidance
+
+
+# ── queue entries ──
+class QueueEntryView(BaseModel):
+    """One queue entry as projected by ``_entry_view`` (status is always ``queued``)."""
+
+    id: str
+    session_id: str
+    priority: int
+    status: str
+    position: int
+    score: float
+    session_req: dict[str, Any]
+    enqueued_at: str | None = None
+
+
+class QueueList(BaseModel):
+    """GET /queue envelope (pagination without total_pages)."""
+
+    data: list[QueueEntryView]
+    pagination: PageMetaNoPages
+
+
+class QueueMineList(BaseModel):
+    """GET /queue/mine envelope (data only, no pagination)."""
+
+    data: list[QueueEntryView]

@@ -1,0 +1,37 @@
+{{- if .Values.createNamespaces }}
+# Namespaces and their Pod Security Admission labels.
+# gshare-sessions enforces `restricted`; gshare-infra is `privileged`, for privileged DaemonSets only.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: {{ .Values.global.namespaces.system }}
+  labels:
+    {{- include "gshare.labels" . | nindent 4 }}
+    pod-security.kubernetes.io/enforce: baseline
+    pod-security.kubernetes.io/audit: restricted
+    pod-security.kubernetes.io/warn: restricted
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: {{ .Values.global.namespaces.sessions }}
+  labels:
+    {{- include "gshare.labels" . | nindent 4 }}
+    # PSA 1.27 and later: enforce the restricted profile (rejecting violations), and audit and warn.
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/enforce-version: latest
+    pod-security.kubernetes.io/audit: restricted
+    pod-security.kubernetes.io/warn: restricted
+    gshare.io/tenant-namespace: "true"
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: {{ .Values.global.namespaces.infra }}
+  labels:
+    {{- include "gshare.labels" . | nindent 4 }}
+    # An exception for the privileged DaemonSets (node-problem-detector, Spegel, the image
+    # pre-puller). This is not a tenant namespace.
+    pod-security.kubernetes.io/enforce: privileged
+    gshare.io/infra: "true"
+{{- end }}

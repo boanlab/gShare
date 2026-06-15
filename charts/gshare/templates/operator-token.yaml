@@ -1,0 +1,201 @@
+{{- /*
+Automatic issuance of the operator's internal JWT, for the self-contained install
+(secrets.generate=true only).
+
+The operator authenticates its callbacks — POST /internal/sessions/{id}/status and friends — with a
+short-lived RS256 internal JWT. The api signs it, holding the private key in gshare-jwt-signing; the
+operator is only a token holder. Helm cannot sign a JWT, so a Job and a CronJob running the api image
+sign one and write it into a Secret:
+
+  - The Job (a post-install and post-upgrade hook) issues one immediately after install or upgrade,
+    by which point the signing key exists.
+  - The CronJob re-signs it daily, before expiry. The operator re-reads the mounted file on every
+    attempt, so rotation causes no downtime.
+
+In production (secrets.generate=false) external-secrets injects the token under the same name and
+key (operator.internalJwtSecret and internal-jwt), so this whole template is disabled.
+*/}}
+{{- if .Values.secrets.generate }}
+{{- $ns := .Values.global.namespaces.system }}
+# ── A dedicated service account and Role for the issuing Job and CronJob, limited to writing the
+#    one secret. ──
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: gshare-operator-token-provisioner
+  namespace: {{ $ns }}
+  labels:
+    {{- include "gshare.labels" . | nindent 4 }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: gshare-operator-token-provisioner
+  namespace: {{ $ns }}
+  labels:
+    {{- include "gshare.labels" . | nindent 4 }}
+rules:
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get", "create", "update", "patch"]   # upsert the operator token secret only; no list, watch, or delete
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: gshare-operator-token-provisioner
+  namespace: {{ $ns }}
+  labels:
+    {{- include "gshare.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: gshare-operator-token-provisioner
+subjects:
+  - kind: ServiceAccount
+    name: gshare-operator-token-provisioner
+    namespace: {{ $ns }}
+---
+# ── The issuing script, run from the api image: sign with app.auth.internal_jwt, then upsert the
+#    Secret through the Kubernetes API. ──
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: gshare-operator-token-mint
+  namespace: {{ $ns }}
+  labels:
+    {{- include "gshare.labels" . | nindent 4 }}
+data:
+  mint.py: |
+    # Sign the operator's internal JWT and upsert it as a Secret. The Kubernetes REST call goes
+    # through httpx (already a runtime dependency) with the service account token, so neither kubectl
+    # nor a Kubernetes client library is needed.
+    import base64, os
+    import httpx
+    from app.auth.internal_jwt import sign_internal_jwt  # on the api image's PYTHONPATH (/srv)
+
+    cluster_id = os.environ.get("CLUSTER_ID", "local")
+    ttl = int(os.environ.get("TOKEN_TTL_SEC", "604800"))
+    name = os.environ["TOKEN_SECRET_NAME"]
+
+    token = sign_internal_jwt(f"operator:{cluster_id}", ttl=ttl)
+
+    sa = "/var/run/secrets/kubernetes.io/serviceaccount"
+    ns = open(f"{sa}/namespace").read().strip()
+    bearer = open(f"{sa}/token").read().strip()
+    hdr = {"Authorization": f"Bearer {bearer}"}
+    base = f"https://kubernetes.default.svc/api/v1/namespaces/{ns}/secrets"
+    body = {
+        "apiVersion": "v1", "kind": "Secret",
+        "metadata": {"name": name, "namespace": ns},
+        "type": "Opaque",
+        "data": {"internal-jwt": base64.b64encode(token.encode()).decode()},
+    }
+    with httpx.Client(verify=f"{sa}/ca.crt", timeout=15) as c:
+        r = c.get(f"{base}/{name}", headers=hdr)
+        if r.status_code == 200:
+            resp = c.put(f"{base}/{name}", headers=hdr, json=body)
+        elif r.status_code == 404:
+            resp = c.post(base, headers=hdr, json=body)
+        else:
+            r.raise_for_status()
+        resp.raise_for_status()
+    print(f"[operator-token] upsert {ns}/{name} ttl={ttl}s sub=operator:{cluster_id}", flush=True)
+---
+# ── Issue once, right after install or upgrade (post-install and post-upgrade hook) ──
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: gshare-operator-token-init
+  namespace: {{ $ns }}
+  labels:
+    {{- include "gshare.labels" . | nindent 4 }}
+  annotations:
+    "helm.sh/hook": post-install,post-upgrade
+    "helm.sh/hook-weight": "5"
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+spec:
+  backoffLimit: 6
+  ttlSecondsAfterFinished: 300
+  template:
+    metadata:
+      labels:
+        {{- include "gshare.labels" . | nindent 8 }}
+    spec:
+      serviceAccountName: gshare-operator-token-provisioner
+      restartPolicy: Never
+      securityContext:
+        {{- include "gshare.podSecurityContext" . | nindent 8 }}
+      {{- include "gshare.imagePullSecrets" . | nindent 6 }}
+      containers:
+        - name: mint
+          image: {{ include "gshare.image" (dict "img" .Values.images.api "root" $) }}
+          imagePullPolicy: {{ .Values.images.api.pullPolicy }}
+          securityContext:
+            {{- include "gshare.containerSecurityContext" . | nindent 12 }}
+          command: ["python", "/mint/mint.py"]
+          env:
+            - { name: CLUSTER_ID, value: {{ .Values.operator.clusterId | quote }} }
+            - { name: TOKEN_TTL_SEC, value: {{ .Values.operator.internalJwtTokenTtlSec | quote }} }
+            - { name: TOKEN_SECRET_NAME, value: {{ .Values.operator.internalJwtSecret | quote }} }
+            # The signing key, from the same secret the api uses; sign_internal_jwt reads it from
+            # settings.
+            - name: GSHARE_INTERNAL_JWT_PRIVATE_KEY
+              valueFrom: { secretKeyRef: { name: gshare-jwt-signing, key: private.pem } }
+            - name: GSHARE_INTERNAL_JWT_KID
+              valueFrom: { secretKeyRef: { name: gshare-jwt-signing, key: active_kid } }
+          volumeMounts:
+            - { name: mint, mountPath: /mint, readOnly: true }
+      volumes:
+        - name: mint
+          configMap:
+            name: gshare-operator-token-mint
+---
+# ── Re-sign daily, before expiry. The operator re-reads the mounted file on every callback attempt,
+#    so the rotation is seamless. ──
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: gshare-operator-token-refresh
+  namespace: {{ $ns }}
+  labels:
+    {{- include "gshare.labels" . | nindent 4 }}
+spec:
+  schedule: "17 3 * * *"                # daily at 03:17, comfortably inside the 7-day TTL
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 1
+  failedJobsHistoryLimit: 2
+  jobTemplate:
+    spec:
+      backoffLimit: 6
+      template:
+        metadata:
+          labels:
+            {{- include "gshare.labels" . | nindent 12 }}
+        spec:
+          serviceAccountName: gshare-operator-token-provisioner
+          restartPolicy: Never
+          securityContext:
+            {{- include "gshare.podSecurityContext" . | nindent 12 }}
+          {{- include "gshare.imagePullSecrets" . | nindent 10 }}
+          containers:
+            - name: mint
+              image: {{ include "gshare.image" (dict "img" .Values.images.api "root" $) }}
+              imagePullPolicy: {{ .Values.images.api.pullPolicy }}
+              securityContext:
+                {{- include "gshare.containerSecurityContext" . | nindent 16 }}
+              command: ["python", "/mint/mint.py"]
+              env:
+                - { name: CLUSTER_ID, value: {{ .Values.operator.clusterId | quote }} }
+                - { name: TOKEN_TTL_SEC, value: {{ .Values.operator.internalJwtTokenTtlSec | quote }} }
+                - { name: TOKEN_SECRET_NAME, value: {{ .Values.operator.internalJwtSecret | quote }} }
+                - name: GSHARE_INTERNAL_JWT_PRIVATE_KEY
+                  valueFrom: { secretKeyRef: { name: gshare-jwt-signing, key: private.pem } }
+                - name: GSHARE_INTERNAL_JWT_KID
+                  valueFrom: { secretKeyRef: { name: gshare-jwt-signing, key: active_kid } }
+              volumeMounts:
+                - { name: mint, mountPath: /mint, readOnly: true }
+          volumes:
+            - name: mint
+              configMap:
+                name: gshare-operator-token-mint
+{{- end }}

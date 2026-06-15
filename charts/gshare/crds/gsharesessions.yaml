@@ -1,0 +1,180 @@
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: gsharesessions.gshare.io
+spec:
+  group: gshare.io
+  names:
+    kind: GShareSession
+    listKind: GShareSessionList
+    plural: gsharesessions
+    singular: gsharesession
+    shortNames:
+      - gss
+  scope: Namespaced
+  versions:
+    - name: v1
+      served: true
+      storage: true
+      subresources:
+        status: {}
+      additionalPrinterColumns:
+        - name: Phase
+          type: string
+          jsonPath: .status.phase
+        - name: Mode
+          type: string
+          jsonPath: .spec.mode
+        - name: GPU
+          type: string
+          jsonPath: .status.boundGpuUuid
+        - name: Age
+          type: date
+          jsonPath: .metadata.creationTimestamp
+      schema:
+        openAPIV3Schema:
+          type: object
+          description: GShareSession is the Schema for the gsharesessions API.
+          properties:
+            apiVersion:
+              type: string
+            kind:
+              type: string
+            metadata:
+              type: object
+            spec:
+              type: object
+              required:
+                - clusterId
+                - resourceClass
+                - image
+                - offeringId
+                - clusterMode
+                - owner
+              properties:
+                clusterId:
+                  type: string
+                resourceClass:
+                  type: string
+                  enum: [gpu, cpu]
+                mode:
+                  type: string
+                  enum: [fractional, exclusive, mig]
+                paused:
+                  type: boolean
+                losslessPause:
+                  type: boolean
+                pauseMode:
+                  type: string
+                  enum: [cold, yield]
+                preemptible:
+                  type: boolean
+                borrowedGpuUuid:
+                  type: string
+                borrowedNode:
+                  type: string
+                gracefulDemote:
+                  type: boolean
+                gpuMemMb:
+                  type: integer
+                gpuCores:
+                  type: integer
+                  minimum: 0
+                  maximum: 100
+                cpu:
+                  type: integer
+                  minimum: 0
+                memGb:
+                  type: integer
+                  minimum: 0
+                diskGb:
+                  type: integer
+                  minimum: 0
+                migProfile:
+                  type: string
+                image:
+                  type: string
+                offeringId:
+                  type: string
+                clusterMode:
+                  type: string
+                  enum: [single, multi]
+                volumes:
+                  type: array
+                  items:
+                    type: object
+                    required: [name, mountPath, mode]
+                    properties:
+                      name:
+                        type: string
+                      mountPath:
+                        type: string
+                      mode:
+                        type: string
+                        enum: [ReadWriteOnce, ReadWriteMany, ReadOnlyMany]
+                connect:
+                  type: object
+                  description: Source of per-session connection credentials.
+                  properties:
+                    authorizedKeys:
+                      type: array
+                      items:
+                        type: string
+                    proxyTokenSecretRef:
+                      type: string
+                billingWalletId:
+                  type: string
+                owner:
+                  type: string
+                projectId:
+                  type: string
+            status:
+              type: object
+              properties:
+                phase:
+                  type: string
+                boundGpuUuid:
+                  type: string
+                podRef:
+                  type: string
+                checkpointRef:
+                  type: string
+                checkpointNode:
+                  type: string
+                yieldState:
+                  type: string
+                evictedVramMb:
+                  type: integer
+                lentTo:
+                  type: string
+                usedMemMb:
+                  type: integer
+                message:
+                  type: string
+                traceId:
+                  type: string
+                lastTransitionTime:
+                  type: string
+                  format: date-time
+                observedGeneration:
+                  type: integer
+                  format: int64
+                conditions:
+                  type: array
+                  x-kubernetes-list-type: map
+                  x-kubernetes-list-map-keys: [type]
+                  items:
+                    type: object
+                    required: [type, status]
+                    properties:
+                      type:
+                        type: string
+                      status:
+                        type: string
+                      reason:
+                        type: string
+                      message:
+                        type: string
+                      lastTransitionTime:
+                        type: string
+                        format: date-time

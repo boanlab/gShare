@@ -1,0 +1,70 @@
+# ── Python (backend) ──
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+coverage.xml
+htmlcov/
+
+# ── Node (frontend) ──
+node_modules/
+dist/
+dist-ssr/
+.vite/
+*.local
+*.tsbuildinfo
+npm-debug.log*
+
+# ── Go (operator) ──
+operator/bin/
+*.test
+*.out
+
+# ── Secrets and environment (examples stay tracked) ──
+.env
+.env.*
+!.env.example
+# Real-domain overlay; only domain.example.yaml is tracked.
+deploy/values/domain.yaml
+# kubeconfigs for externally registered clusters, mounted into Compose.
+deploy/clusters/**
+!deploy/clusters/README.md
+*.pem
+*.key
+*.p12
+kubeconfig
+*.kubeconfig
+*.tok
+
+# ── Build and deploy artifacts ──
+*.tgz
+*.log
+*.tmp
+tmp/
+/tmp-*
+*.bak
+*.orig
+
+# ── IDE / OS ──
+.idea/
+.vscode/
+*.swp
+.DS_Store
+Thumbs.db
+
+# ── e2e artifacts ──
+test/e2e/frontend/out/
+test/e2e/frontend/node_modules/
+test/e2e/frontend/package*.json
+
+# ── Cluster topology with real addresses; only the example is tracked. ──
+hack/cluster-info
+
+# UX audit reports are a point-in-time artefact of a local run, not source.
+test/e2e/ux/out/
+test/e2e/ux/out-*/

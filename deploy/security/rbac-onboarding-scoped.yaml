@@ -1,0 +1,95 @@
+# Onboarding RBAC for a remote target cluster: namespace-scoped least privilege, a read-only
+# ClusterRole, and an in-cluster service account.
+#
+# No blanket access to secrets, no pods/exec, no long-lived token grants, and no wildcard verbs. There
+# is no long-lived kubeconfig either — access rotates through 24-hour TokenRequests.
+#
+# Apply this to the cluster being onboarded, which the GShare control plane will reconcile remotely.
+# Bootstrapping then issues only a short-lived token:
+#   kubectl create token gshare-controller -n gshare-system --duration=1h
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: gshare-controller
+  namespace: gshare-system
+automountServiceAccountToken: false
+---
+# (A) Cluster scope: read-only inventory plus the cordon patch. No secrets, no exec, no writes.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: gshare-controller-inventory
+rules:
+  - apiGroups: [""]
+    resources: ["nodes"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["namespaces"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["node.k8s.io"]
+    resources: ["runtimeclasses"]
+    verbs: ["get", "list", "watch"]         # onboarding check: does the nvidia RuntimeClass exist
+  - apiGroups: ["apps"]
+    resources: ["daemonsets"]
+    verbs: ["get", "list", "watch"]         # onboarding check: is HAMi or a device plugin present
+  - apiGroups: [""]
+    resources: ["nodes"]
+    verbs: ["patch"]                        # cordon (unschedulable) only; draining deletes pods under Role B
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: gshare-controller-inventory
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: gshare-controller-inventory
+subjects:
+  - kind: ServiceAccount
+    name: gshare-controller
+    namespace: gshare-system
+---
+# (B) Session lifecycle: a Role confined to gshare-sessions, replacing any blanket secrets access
+#     with per-session access.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: gshare-session-manager
+  namespace: gshare-sessions
+rules:
+  - apiGroups: [""]
+    resources: ["pods", "services", "configmaps", "persistentvolumeclaims"]
+    verbs: ["create", "get", "list", "watch", "delete"]
+  - apiGroups: ["networking.k8s.io"]
+    resources: ["ingresses"]
+    verbs: ["create", "get", "list", "watch", "delete"]
+  - apiGroups: [""]
+    resources: ["secrets"]                  # the per-session ses-<id>-secret only; no list, watch, or update
+    verbs: ["create", "get", "delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: gshare-session-manager
+  namespace: gshare-sessions
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: gshare-session-manager
+subjects:
+  - kind: ServiceAccount
+    name: gshare-controller
+    namespace: gshare-system
+---
+# (C) Debug exec: an operational toggle, left unapplied and unbound in normal operation. During an
+#     incident, add a temporary RoleBinding and remove it afterwards.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: gshare-session-exec
+  namespace: gshare-sessions
+rules:
+  - apiGroups: [""]
+    resources: ["pods/log", "pods/exec"]
+    verbs: ["get", "create"]

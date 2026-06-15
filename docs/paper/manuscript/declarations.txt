@@ -1,0 +1,40 @@
+Elsevier / FGCS required declarations — fill the bracketed parts, then paste into the
+submission system (and/or the manuscript before the references).
+
+============================================================
+Declaration of competing interest
+============================================================
+The authors declare that they have no known competing financial interests or personal
+relationships that could have appeared to influence the work reported in this paper.
+% [If any exist, replace with the disclosure.]
+
+============================================================
+CRediT author statement
+============================================================
+% Fill per author. Roles: Conceptualization, Methodology, Software, Validation, Formal
+% analysis, Investigation, Resources, Data curation, Writing - original draft, Writing -
+% review & editing, Visualization, Supervision, Project administration, Funding acquisition.
+[Author 1]: Conceptualization, Methodology, Software, Validation, Investigation,
+            Writing - original draft, Visualization.
+[Author 2]: [roles]
+% [add authors as needed]
+
+============================================================
+Funding
+============================================================
+This work was supported by [FUNDING SOURCE, GRANT NUMBER].
+% [If none:] This research did not receive any specific grant from funding agencies in the
+% public, commercial, or not-for-profit sectors.
+
+============================================================
+Data availability
+============================================================
+The reproducibility artifact -- measurement scripts, raw data (CSV/logs), and figure-generation
+sources for all experiments -- is available at [REPO/DOI]. The Alibaba PAI 2020 GPU trace used in
+Section 6 is publicly available from its original authors (Weng et al., NSDI 2022); our parsing
+scripts are included in the artifact.
+
+============================================================
+Acknowledgments  (optional, not a formal declaration)
+============================================================
+We thank [NAMES] for [contribution]; [compute/cluster acknowledgment].

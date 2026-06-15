@@ -1,0 +1,150 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+# One run per ref. Superseded pushes are cancelled so the queue stays short.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  backend:
+    name: backend (python)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: backend/pyproject.toml
+      - name: Install
+        working-directory: backend
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+      - name: Lint
+        working-directory: backend
+        run: ruff check app tests
+      - name: Test
+        working-directory: backend
+        # Tests marked `realgpu` need a physical GPU cluster and run out of band.
+        run: pytest -m "not realgpu" --cov=app --cov-report=xml --cov-report=term-missing
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: backend-coverage
+          path: backend/coverage.xml
+          if-no-files-found: ignore
+
+  operator:
+    name: operator (go)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: operator/go.mod
+          cache-dependency-path: operator/go.sum
+      - name: Lint
+        working-directory: operator
+        run: make lint
+      - name: Verify generated manifests are up to date
+        working-directory: operator
+        run: |
+          make manifests generate
+          git diff --exit-code -- api config \
+            || { echo "::error::Generated files are stale. Run 'make -C operator manifests generate' and commit."; exit 1; }
+      - name: Test
+        working-directory: operator
+        run: make test
+      - name: Build
+        working-directory: operator
+        run: go build ./...
+
+  frontend:
+    name: frontend (node)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - name: Install
+        working-directory: frontend
+        run: npm ci
+      - name: Lint
+        working-directory: frontend
+        run: npm run lint
+      - name: Test
+        working-directory: frontend
+        run: npm run test
+      - name: Type-check and build
+        working-directory: frontend
+        run: npm run build
+
+  chart:
+    name: helm chart
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: azure/setup-helm@v4
+        with:
+          version: v3.16.3
+      - name: Lint
+        run: helm lint charts/gshare
+      - name: Render every values overlay
+        # domain.example.yaml is a template with placeholder values, not a deployable overlay.
+        run: |
+          for values in deploy/values/*.yaml; do
+            case "$values" in *domain.example.yaml) continue;; esac
+            echo "::group::helm template -f $values"
+            helm template gshare charts/gshare -f "$values" > /dev/null
+            echo "::endgroup::"
+          done
+
+  shell:
+    name: shell scripts
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: ShellCheck
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y -qq shellcheck
+          # Errors only. Style and info findings are tracked separately, not gated on.
+          find build hack test -name '*.sh' -not -path '*/node_modules/*' -print0 \
+            | xargs -0 shellcheck --severity=error --external-sources
+
+  images:
+    name: image build
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: backend
+            context: backend
+          - name: operator
+            context: operator
+          - name: frontend
+            context: frontend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - name: Build ${{ matrix.name }} image
+        uses: docker/build-push-action@v6
+        with:
+          context: ${{ matrix.context }}
+          push: false
+          load: false
+          cache-from: type=gha,scope=${{ matrix.name }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.name }}

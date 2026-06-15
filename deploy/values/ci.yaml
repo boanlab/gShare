@@ -1,0 +1,48 @@
+# Helm values for CI: a faster billing tick and a shorter idle timeout, so the hold, consume, and
+# settle path and the idle reaper — which take minutes in production — can be verified in seconds.
+# Uses locally built images tagged dev, with cosign verification off, since CI installs neither
+# Kyverno nor any signing material.
+
+global:
+  imageRegistry: registry.gshare.internal
+  # No imagePullSecret is needed in CI.
+  #  - On an existing kubeadm cluster, either import the images into each node's containerd
+  #    (ctr -n k8s.io images import) or push them to an internal registry.
+  imagePullSecrets: []
+
+createNamespaces: true
+
+images:
+  api:      { repository: gshare-api,      tag: "dev", pullPolicy: IfNotPresent }
+  worker:   { repository: gshare-worker,   tag: "dev", pullPolicy: IfNotPresent }
+  operator: { repository: gshare-operator, tag: "dev", pullPolicy: IfNotPresent }
+  frontend: { repository: gshare-frontend, tag: "dev", pullPolicy: IfNotPresent }
+
+api:
+  replicas: 1
+
+worker:
+  replicas: 1
+
+operator:
+  replicas: 1
+  # The in-cluster service address for the JWKS. Every other route and callback is derived from
+  # global.* flags.
+  internalJwksUrl: "http://api.gshare-system.svc/.well-known/gshare-internal-jwks.json"
+
+frontend:
+  replicas: 1
+
+# CI assumes lightweight single instances of Postgres and Redis rather than the in-cluster data tier.
+postgres:
+  host: gshare-pg-rw.gshare-system.svc
+  port: 5432
+  database: gshare
+  credentialsSecret: gshare-pg-app
+redis:
+  host: gshare-redis.gshare-system.svc
+  port: 6379
+
+ingress:
+  enabled: true
+  className: nginx

@@ -1,0 +1,14 @@
+# Default reviewers for everything not matched below.
+*                       @boanlab/gshare-maintainers
+
+/backend/               @boanlab/gshare-maintainers
+/operator/              @boanlab/gshare-maintainers
+/frontend/              @boanlab/gshare-maintainers
+
+# Deployment surface and supply chain — changes here affect every operator of GShare.
+/charts/                @boanlab/gshare-maintainers
+/deploy/                @boanlab/gshare-maintainers
+/build/                 @boanlab/gshare-maintainers
+/.github/               @boanlab/gshare-maintainers
+
+/docs/                  @boanlab/gshare-maintainers

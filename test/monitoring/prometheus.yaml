@@ -1,0 +1,48 @@
+# A lightweight Prometheus that scrapes the DCGM exporter on :9400.
+# It exists to exercise the pipeline: synthetic DCGM metrics are stored and queried, and the dashboard
+# renders on top of that.
+---
+apiVersion: v1
+kind: Namespace
+metadata: { name: monitoring }
+---
+apiVersion: v1
+kind: ConfigMap
+metadata: { name: prometheus-config, namespace: monitoring }
+data:
+  prometheus.yml: |
+    global: { scrape_interval: 10s }
+    scrape_configs:
+      - job_name: fake-dcgm
+        static_configs:
+          - targets: ['nvidia-dcgm-exporter.gpu-operator.svc:9400']
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata: { name: prometheus, namespace: monitoring }
+spec:
+  replicas: 1
+  selector: { matchLabels: { app: prometheus } }
+  template:
+    metadata: { labels: { app: prometheus } }
+    spec:
+      containers:
+        - name: prometheus
+          image: prom/prometheus:v2.54.1
+          args: ["--config.file=/etc/prometheus/prometheus.yml", "--storage.tsdb.path=/prometheus"]
+          ports: [ { containerPort: 9090, name: web } ]
+          volumeMounts:
+            - { name: config, mountPath: /etc/prometheus }
+          readinessProbe:
+            httpGet: { path: /-/ready, port: web }
+            initialDelaySeconds: 5
+      volumes:
+        - name: config
+          configMap: { name: prometheus-config }
+---
+apiVersion: v1
+kind: Service
+metadata: { name: prometheus, namespace: monitoring }
+spec:
+  selector: { app: prometheus }
+  ports: [ { port: 9090, targetPort: web } ]

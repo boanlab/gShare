@@ -1,0 +1,23 @@
+# E1 concurrent-share condition: two co-located HAMi fractional pods on one card.
+# Vary gpucores (50/50, 70/30, 90/10) — compute-bound SGEMM converges to ~½ each regardless.
+apiVersion: v1
+kind: Pod
+metadata: {name: e2e-share-r, namespace: default, labels: {app: e2e}}
+spec:
+  restartPolicy: Never
+  nodeSelector: {kubernetes.io/hostname: gpu2-1}
+  containers:
+  - {name: w, image: docker.io/boanlab/gshare-e2e-workload:latest,
+     args: ["--mem-gb","6","--secs","75","--tag","share_R"],
+     resources: {limits: {nvidia.com/gpu: "1", nvidia.com/gpucores: "50", nvidia.com/gpumem: "6144"}}}
+---
+apiVersion: v1
+kind: Pod
+metadata: {name: e2e-share-s, namespace: default, labels: {app: e2e}}
+spec:
+  restartPolicy: Never
+  nodeSelector: {kubernetes.io/hostname: gpu2-1}
+  containers:
+  - {name: w, image: docker.io/boanlab/gshare-e2e-workload:latest,
+     args: ["--mem-gb","6","--secs","75","--tag","share_S"],
+     resources: {limits: {nvidia.com/gpu: "1", nvidia.com/gpucores: "50", nvidia.com/gpumem: "6144"}}}

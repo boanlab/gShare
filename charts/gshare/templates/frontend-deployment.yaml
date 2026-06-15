@@ -1,0 +1,49 @@
+{{- if .Values.controlPlane.enabled }}
+# gshare-frontend — the console SPA for users and administrators, with live updates over SSE.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: gshare-frontend
+  namespace: {{ .Values.global.namespaces.system }}
+  labels:
+    {{- include "gshare.labels" . | nindent 4 }}
+    app.kubernetes.io/name: gshare-frontend
+spec:
+  replicas: {{ .Values.frontend.replicas }}
+  selector:
+    matchLabels:
+      {{- include "gshare.selectorLabels" (dict "component" "gshare-frontend") | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "gshare.labels" . | nindent 8 }}
+        {{- include "gshare.selectorLabels" (dict "component" "gshare-frontend") | nindent 8 }}
+    spec:
+      automountServiceAccountToken: false
+      {{- include "gshare.imagePullSecrets" . | nindent 6 }}
+      securityContext:
+        {{- include "gshare.podSecurityContext" . | nindent 8 }}
+      containers:
+        - name: frontend
+          image: {{ include "gshare.image" (dict "img" .Values.images.frontend "root" $) }}
+          imagePullPolicy: {{ .Values.images.frontend.pullPolicy }}
+          securityContext:
+            {{- include "gshare.containerSecurityContext" . | nindent 12 }}
+          ports:
+            - { name: http, containerPort: {{ .Values.frontend.port }} }
+          # VITE_* variables are build-time only; setting them at runtime has no effect. They are
+          # baked in from frontend/.env when the image is built.
+          volumeMounts:
+            # Scratch paths nginx needs, so the container can run with a read-only root filesystem.
+            - { name: cache, mountPath: /var/cache/nginx }
+            - { name: run, mountPath: /var/run }
+          readinessProbe:
+            httpGet: { path: /, port: http }
+            initialDelaySeconds: 5
+          resources:
+            {{- toYaml .Values.frontend.resources | nindent 12 }}
+      volumes:
+        - { name: cache, emptyDir: {} }
+        - { name: run, emptyDir: {} }
+
+{{- end }}

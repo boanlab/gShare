@@ -1,0 +1,34 @@
+# CPU session image on Ubuntu 24.04: code-server, JupyterLab, ttyd, and a data-science stack. No GPU.
+# It honours the same connection contract as session-base — the same ports, paths, and entrypoint —
+# and runs as non-root (uid 1000), which satisfies restricted Pod Security.
+# Catalogue entry: name="Python ML (CPU · Ubuntu 24.04)", tag=ubuntu24.04-cpu-ml
+# Build context: build/images, so session-base/entrypoint.sh can be shared.
+FROM codercom/code-server:latest AS cs
+
+FROM ubuntu:24.04
+ARG TTYD_VERSION=1.7.7
+
+# Copy in code-server, which bundles its own Node.
+COPY --from=cs /usr/lib/code-server /usr/lib/code-server
+COPY --from=cs /usr/bin/code-server /usr/bin/code-server
+
+# The noble base ships a default `ubuntu` user at uid 1000, so remove it and create `coder` there.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      python3-pip python3-venv iproute2 tini ca-certificates wget git && \
+    rm -rf /var/lib/apt/lists/* && \
+    { userdel -r ubuntu 2>/dev/null || true; } && \
+    useradd -m -u 1000 -s /bin/bash coder
+# Ubuntu 24.04 marks its Python as externally managed (PEP 668), hence --break-system-packages.
+RUN pip3 install --no-cache-dir --break-system-packages \
+      jupyterlab notebook numpy pandas matplotlib scikit-learn scipy
+RUN wget -qO /usr/local/bin/ttyd \
+      "https://github.com/tsl0922/ttyd/releases/download/${TTYD_VERSION}/ttyd.x86_64" && \
+    chmod +x /usr/local/bin/ttyd
+
+COPY session-base/entrypoint.sh /usr/local/bin/gshare-session
+RUN chmod +x /usr/local/bin/gshare-session
+
+USER 1000
+ENV HOME=/home/coder
+EXPOSE 8080 8888 7681
+ENTRYPOINT ["tini", "--", "/usr/local/bin/gshare-session"]

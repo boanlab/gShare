@@ -1,0 +1,18 @@
+# The deployment-local overlay: the two things that differ per deployment — the domain and the
+# bootstrap administrator — are set here and nowhere else. It overrides incluster.yaml,
+# dockerhub.yaml, and the chart defaults.
+#
+#   cp deploy/values/domain.example.yaml deploy/values/domain.yaml   # then fill in the real values
+#   make deploy-incluster   # applies domain.yaml with -f when it exists; so does make prod-deploy
+#
+# The real file (domain.yaml) is git-ignored; only this example is tracked.
+global:
+  domains:
+    console: gshare.example.com   # replace with the real domain; the console, the sessions at
+                                  # /proxy/{cr}, and the ingress host all follow this one value
+
+# The super_admin account created on first start. The display name is edited from the console.
+bootstrapAdmin:
+  email: admin@example.com        # the administrator's real email, which is the login id
+  password: change-me-please      # initial password, forced to change at first login;
+                                  # set to "" to have one generated

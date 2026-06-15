@@ -1,0 +1,83 @@
+# The GShare operator, as deployed for testing: it watches GShareSession resources and creates the
+# session pod, service, and ingress.
+# deploy.sh rewrites docker.io/boanlab/gshare-operator:latest to ${REGISTRY}/${ORG}/…:${TAG}.
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata: { name: gshare-operator, namespace: gshare-system }
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata: { name: gshare-operator }
+rules:
+  - apiGroups: ["gshare.io"]
+    resources: ["gsharesessions", "gsharesessions/status", "gsharesessions/finalizers"]
+    verbs: ["*"]
+  - apiGroups: [""]
+    resources: ["pods", "services", "secrets", "configmaps", "events"]
+    verbs: ["*"]
+  - apiGroups: ["networking.k8s.io"]
+    resources: ["ingresses"]
+    verbs: ["*"]
+  - apiGroups: [""]
+    resources: ["nodes"]
+    verbs: ["get", "list", "watch", "patch", "update"]   # inventory/health(cordon)
+  - apiGroups: ["coordination.k8s.io"]
+    resources: ["leases"]
+    verbs: ["*"]                                          # leader election; harmless even when it is off
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata: { name: gshare-operator }
+roleRef: { apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: gshare-operator }
+subjects:
+  - { kind: ServiceAccount, name: gshare-operator, namespace: gshare-system }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata: { name: gshare-operator, namespace: gshare-system }
+spec:
+  replicas: 1
+  selector: { matchLabels: { app: gshare-operator } }
+  template:
+    metadata: { labels: { app: gshare-operator } }
+    spec:
+      serviceAccountName: gshare-operator
+      containers:
+        - name: manager
+          image: docker.io/boanlab/gshare-operator:latest
+          imagePullPolicy: Always
+          args:
+            - --session-namespace=gshare-sessions
+            - --cluster-id=clu_fake
+            - --leader-elect=false
+            - --health-probe-bind-address=:8081
+            - --metrics-bind-address=:8080
+            # Session ingress forward-auth. connect-verify-url must be a fully qualified name
+            # (.svc.cluster.local). session-domain is the console domain, serving the path-based
+            # /proxy/{cr}. TLS is terminated by the reverse proxy in front, so the session ingress
+            # itself speaks plain HTTP.
+            - --session-domain=gshare.example.com
+            - --connect-verify-url=http://gshare-api.gshare-system.svc.cluster.local/internal/connect/verify
+          env:
+            # Where the status callbacks go: the api's internal plane. The token is mounted at
+            # /var/run/gshare/internal-jwt.
+            - { name: SOT_ENDPOINT, value: "http://gshare-api.gshare-system.svc" }
+            - { name: INTERNAL_JWT_TOKEN_FILE, value: "/var/run/gshare/internal-jwt" }
+            - { name: INTERNAL_JWKS_URL, value: "http://gshare-api.gshare-system.svc/.well-known/gshare-internal-jwks.json" }
+          ports:
+            - { containerPort: 8081, name: health }
+          readinessProbe:
+            httpGet: { path: /readyz, port: health }
+            initialDelaySeconds: 5
+          livenessProbe:
+            httpGet: { path: /healthz, port: health }
+            initialDelaySeconds: 15
+          volumeMounts:
+            - { name: internal-jwt, mountPath: /var/run/gshare, readOnly: true }
+      volumes:
+        - name: internal-jwt
+          secret:
+            secretName: gshare-operator-token
+            items:
+              - { key: internal-jwt, path: internal-jwt }

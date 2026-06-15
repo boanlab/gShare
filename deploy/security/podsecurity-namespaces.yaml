@@ -1,0 +1,51 @@
+# Pod Security Admission: enforcing the restricted and privileged profiles through namespace labels.
+# A standalone manifest, for when the chart does not create the namespaces or they are applied
+# externally.
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: gshare-system
+  labels:
+    # Control plane (api, worker, operator, Postgres, Redis): baseline, enforced. Some of these need
+    # a service account token.
+    pod-security.kubernetes.io/enforce: baseline
+    pod-security.kubernetes.io/enforce-version: latest
+    pod-security.kubernetes.io/audit: restricted
+    pod-security.kubernetes.io/warn: restricted
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: gshare-sessions
+  labels:
+    # Tenant sessions: restricted, enforced. Anything not running as non-root is denied at admission.
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/enforce-version: latest
+    pod-security.kubernetes.io/audit: restricted
+    pod-security.kubernetes.io/warn: restricted
+    gshare.io/tenant-namespace: "true"
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: gshare-infra
+  labels:
+    # Privileged DaemonSets only (node-problem-detector, Spegel, the image pre-puller), which need
+    # hostPath and privileged. This is not a tenant namespace.
+    pod-security.kubernetes.io/enforce: privileged
+    pod-security.kubernetes.io/enforce-version: latest
+    gshare.io/infra: "true"
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: gshare-build
+  labels:
+    # In-cluster Kaniko builds, which are daemonless. The global build quota lives in
+    # limitrange-resourcequota.yaml.
+    pod-security.kubernetes.io/enforce: baseline
+    pod-security.kubernetes.io/enforce-version: latest
+    pod-security.kubernetes.io/audit: restricted
+    pod-security.kubernetes.io/warn: restricted
+    gshare.io/build-namespace: "true"

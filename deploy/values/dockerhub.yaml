@@ -1,0 +1,13 @@
+# Values overlay for a production deployment from the public Docker Hub images under boanlab.
+#   helm upgrade -i gshare ./charts/gshare -f deploy/values/dockerhub.yaml
+# The images are public, so no imagePullSecrets are needed.
+global:
+  imageRegistry: docker.io/boanlab
+  imagePullSecrets: []
+
+images:
+  # api and worker run the same gshare-backend image with different commands.
+  api:      { repository: gshare-backend,  tag: "latest", pullPolicy: IfNotPresent }
+  worker:   { repository: gshare-backend,  tag: "latest", pullPolicy: IfNotPresent }
+  operator: { repository: gshare-operator, tag: "latest", pullPolicy: IfNotPresent }
+  frontend: { repository: gshare-frontend, tag: "latest", pullPolicy: IfNotPresent }

@@ -1,0 +1,339 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>GShare — 쿠버네티스 GPU 공유 플랫폼</title>
+<meta name="description" content="여러 조직·부서·사용자가 하나의 GPU 클러스터를 분할(fractional)·전용(exclusive)으로 나눠 쓰고, 크레딧으로 과금·관리하는 GPU 공유 플랫폼.">
+<style>
+  :root{
+    --bg:#0b1020; --bg2:#121933; --card:#161e3d; --line:#26305a;
+    --fg:#eef1fb; --muted:#9aa6cf; --brand:#6c8cff; --brand2:#37e0c8; --accent:#ffb86b;
+    --max:1080px;
+  }
+  *{box-sizing:border-box}
+  html{scroll-behavior:smooth}
+  body{
+    margin:0; color:var(--fg);
+    background:var(--bg);
+    font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","Apple SD Gothic Neo","Malgun Gothic","Noto Sans KR",Roboto,sans-serif;
+    line-height:1.65; -webkit-font-smoothing:antialiased;
+  }
+  a{color:inherit}
+  .wrap{max-width:var(--max); margin:0 auto; padding:0 24px}
+  .eyebrow{color:var(--brand2); font-weight:700; letter-spacing:.12em; text-transform:uppercase; font-size:.78rem}
+  h1,h2,h3{line-height:1.25; margin:0}
+  .muted{color:var(--muted)}
+
+  /* nav */
+  nav{position:sticky; top:0; z-index:10; backdrop-filter:blur(10px);
+      background:rgba(11,16,32,.72); border-bottom:1px solid var(--line)}
+  nav .wrap{display:flex; align-items:center; justify-content:space-between; height:60px}
+  .brand{display:flex; align-items:center; gap:10px; font-weight:800; letter-spacing:-.01em}
+  .brand .logo{width:26px;height:26px}
+  .navlinks{display:flex; gap:22px; font-size:.92rem}
+  .navlinks a{color:var(--muted); text-decoration:none}
+  .navlinks a:hover{color:var(--fg)}
+  @media(max-width:680px){.navlinks{display:none}}
+
+  /* hero */
+  .hero{position:relative; overflow:hidden;
+        background:
+          radial-gradient(900px 480px at 78% -10%, rgba(55,224,200,.16), transparent 60%),
+          radial-gradient(820px 520px at 8% 0%, rgba(108,140,255,.22), transparent 55%),
+          linear-gradient(180deg,var(--bg2),var(--bg));}
+  .hero .wrap{padding:84px 24px 72px}
+  .hero h1{font-size:clamp(2.1rem,5vw,3.5rem); font-weight:850; letter-spacing:-.02em; margin:18px 0 16px}
+  .hero h1 .grad{background:linear-gradient(90deg,var(--brand),var(--brand2)); -webkit-background-clip:text; background-clip:text; color:transparent}
+  .hero p.lead{font-size:1.15rem; max-width:640px; color:#cfd6f5}
+  .cta{display:flex; gap:14px; flex-wrap:wrap; margin-top:30px}
+  .btn{display:inline-block; padding:13px 22px; border-radius:11px; font-weight:700; text-decoration:none; font-size:.96rem; transition:.15s}
+  .btn.primary{background:linear-gradient(90deg,var(--brand),#8aa0ff); color:#0b1020}
+  .btn.primary:hover{filter:brightness(1.08); transform:translateY(-1px)}
+  .btn.ghost{border:1px solid var(--line); color:var(--fg)}
+  .btn.ghost:hover{border-color:var(--brand); color:#fff}
+
+  .stats{display:grid; grid-template-columns:repeat(4,1fr); gap:16px; margin-top:54px}
+  .stat{background:rgba(22,30,61,.6); border:1px solid var(--line); border-radius:14px; padding:18px 20px}
+  .stat b{display:block; font-size:1.5rem; background:linear-gradient(90deg,var(--brand2),var(--brand)); -webkit-background-clip:text; background-clip:text; color:transparent}
+  .stat span{font-size:.86rem; color:var(--muted)}
+  @media(max-width:680px){.stats{grid-template-columns:repeat(2,1fr)}}
+
+  section{padding:72px 0; border-top:1px solid var(--line)}
+  section h2{font-size:clamp(1.6rem,3.2vw,2.2rem); font-weight:800; letter-spacing:-.01em}
+  section .sub{color:var(--muted); max-width:680px; margin-top:12px; font-size:1.04rem}
+
+  /* problem / solution */
+  .ps{display:grid; grid-template-columns:1fr 1fr; gap:22px; margin-top:36px}
+  @media(max-width:760px){.ps{grid-template-columns:1fr}}
+  .panel{border:1px solid var(--line); border-radius:16px; padding:26px; background:var(--card)}
+  .panel.problem{border-color:#5a2742; background:linear-gradient(180deg,rgba(90,39,66,.25),var(--card))}
+  .panel.solution{border-color:#22564f; background:linear-gradient(180deg,rgba(34,86,79,.25),var(--card))}
+  .panel h3{font-size:1.15rem; margin-bottom:14px; display:flex; align-items:center; gap:9px}
+  .panel ul{margin:0; padding-left:2px; list-style:none}
+  .panel li{position:relative; padding-left:26px; margin:11px 0; color:#dde3f7}
+  .panel li::before{position:absolute; left:0; top:0}
+  .panel.problem li::before{content:"✕"; color:#ff7a9c; font-weight:700}
+  .panel.solution li::before{content:"✓"; color:var(--brand2); font-weight:700}
+
+  /* features */
+  .grid3{display:grid; grid-template-columns:repeat(3,1fr); gap:20px; margin-top:40px}
+  @media(max-width:860px){.grid3{grid-template-columns:1fr}}
+  .feat{border:1px solid var(--line); border-radius:16px; padding:26px; background:var(--card); transition:.18s}
+  .feat:hover{transform:translateY(-3px); border-color:var(--brand)}
+  .feat .ic{width:42px;height:42px;border-radius:11px; display:grid; place-items:center; margin-bottom:16px;
+            background:linear-gradient(135deg,rgba(108,140,255,.25),rgba(55,224,200,.2)); border:1px solid var(--line)}
+  .feat h3{font-size:1.12rem; margin-bottom:8px}
+  .feat p{color:var(--muted); font-size:.96rem; margin:0}
+  .badge{display:inline-block; margin-top:14px; font-size:.74rem; font-weight:700; padding:4px 10px; border-radius:999px;
+         color:var(--brand2); border:1px solid var(--line); background:rgba(55,224,200,.08)}
+  .badge.design{color:var(--accent); background:rgba(255,184,107,.08)}
+
+  /* how it works */
+  .flow{display:grid; grid-template-columns:repeat(4,1fr); gap:14px; margin-top:40px}
+  @media(max-width:860px){.flow{grid-template-columns:1fr 1fr}}
+  .step{border:1px solid var(--line); border-radius:14px; padding:22px; background:var(--card); position:relative}
+  .step .n{font-size:.78rem; font-weight:800; color:var(--brand); letter-spacing:.1em}
+  .step h3{font-size:1.02rem; margin:8px 0 6px}
+  .step p{color:var(--muted); font-size:.9rem; margin:0}
+
+  /* architecture */
+  .arch{margin-top:36px; border:1px solid var(--line); border-radius:16px; overflow:hidden; background:#0d1430}
+  .arch pre{margin:0; padding:26px; overflow:auto; color:#c6d0f5; font-size:.86rem; line-height:1.7;
+            font-family:"SFMono-Regular",ui-monospace,"D2Coding",Consolas,monospace}
+  .arch .cap{padding:14px 22px; border-top:1px solid var(--line); color:var(--muted); font-size:.9rem}
+
+  /* roles */
+  .roles{width:100%; border-collapse:collapse; margin-top:32px; font-size:.95rem}
+  .roles th,.roles td{padding:13px 16px; text-align:left; border-bottom:1px solid var(--line)}
+  .roles th{color:var(--brand2); font-weight:700; font-size:.82rem; letter-spacing:.04em; text-transform:uppercase}
+  .roles td:first-child{font-weight:700}
+  .roles tr:hover td{background:rgba(108,140,255,.05)}
+
+  /* cta band */
+  .band{background:linear-gradient(135deg,rgba(108,140,255,.18),rgba(55,224,200,.14)); border:1px solid var(--line);
+        border-radius:20px; padding:46px; text-align:center; margin:64px 0}
+  .band h2{font-size:1.8rem}
+  .band p{color:#cfd6f5; margin:12px auto 26px; max-width:560px}
+
+  footer{border-top:1px solid var(--line); padding:34px 0; color:var(--muted); font-size:.9rem}
+  footer .wrap{display:flex; justify-content:space-between; gap:16px; flex-wrap:wrap; align-items:center}
+  footer a{color:var(--muted); text-decoration:none}
+  footer a:hover{color:var(--fg)}
+  code{background:rgba(255,255,255,.06); padding:2px 7px; border-radius:6px; font-size:.86em}
+</style>
+</head>
+<body>
+
+<nav>
+  <div class="wrap">
+    <div class="brand">
+      <svg class="logo" viewBox="0 0 32 32" fill="none" xmlns="http://www.w3.org/2000/svg">
+        <rect x="2" y="2" width="28" height="28" rx="8" fill="url(#g)"/>
+        <path d="M16 8.5l6 3.5v7l-6 3.5-6-3.5v-7l6-3.5z" stroke="#0b1020" stroke-width="1.8" fill="none"/>
+        <circle cx="16" cy="15.5" r="2.4" fill="#0b1020"/>
+        <defs><linearGradient id="g" x1="2" y1="2" x2="30" y2="30">
+          <stop stop-color="#6c8cff"/><stop offset="1" stop-color="#37e0c8"/>
+        </linearGradient></defs>
+      </svg>
+      GShare
+    </div>
+    <div class="navlinks">
+      <a href="#problem">문제</a>
+      <a href="#features">핵심 기능</a>
+      <a href="#how">동작 방식</a>
+      <a href="#arch">아키텍처</a>
+      <a href="#roles">역할</a>
+    </div>
+  </div>
+</nav>
+
+<header class="hero">
+  <div class="wrap">
+    <div class="eyebrow">Kubernetes GPU Sharing Platform</div>
+    <h1>하나의 GPU 클러스터를<br><span class="grad">조직 전체가 나눠 씁니다</span></h1>
+    <p class="lead">
+      GShare는 여러 조직·부서·사용자가 하나의 GPU 클러스터를 <b>분할(fractional)</b>·<b>전용(exclusive)</b>으로
+      나눠 쓰고, <b>크레딧</b>으로 과금·관리하는 GPU 공유 플랫폼입니다.
+      GPU를 직접 쪼개는 대신, 그 위에서 <b>누가·얼마나·어떤 비용으로</b> 쓰는지를 책임지는 제어 영역입니다.
+    </p>
+    <div class="cta">
+      <a class="btn primary" href="#features">핵심 기능 보기</a>
+      <a class="btn ghost" href="https://github.com/boanlab/gShare/blob/main/docs/getting-started.md" target="_blank" rel="noopener">시작하기 가이드 →</a>
+    </div>
+
+    <div class="stats">
+      <div class="stat"><b>2가지 모드</b><span>분할 vGPU · 전용 풀카드</span></div>
+      <div class="stat"><b>4계층 크레딧</b><span>시스템→조직→부서→개인</span></div>
+      <div class="stat"><b>유휴 자동 회수</b><span>idle GPU 자동 일시정지</span></div>
+      <div class="stat"><b>멀티 클러스터</b><span>외부 GPU 클러스터 연동</span></div>
+    </div>
+  </div>
+</header>
+
+<section id="problem">
+  <div class="wrap">
+    <div class="eyebrow">왜 필요한가</div>
+    <h2>GPU는 비싼데, 늘 누군가는 놀고 있습니다</h2>
+    <p class="sub">전용 할당은 단순하지만 활용률이 낮고, 단순 분할은 비용·한도·회수를 통제하지 못합니다.
+      GShare는 분할 기술(HAMi) 위에서 운영 문제를 해결합니다.</p>
+
+    <div class="ps">
+      <div class="panel problem">
+        <h3>🔻 기존 방식의 한계</h3>
+        <ul>
+          <li>1인 1카드 전용 할당 → 점유 시간 대부분 GPU 유휴</li>
+          <li>단순 time-slicing/분할은 비용 귀속·한도 관리가 없음</li>
+          <li>유휴 세션이 카드를 붙잡아 대기열만 길어짐</li>
+          <li>부서·조직별 예산 통제와 감사 추적이 어려움</li>
+          <li>큰 작업이 들어갈 빈 카드가 조각나 사라짐(단편화)</li>
+        </ul>
+      </div>
+      <div class="panel solution">
+        <h3>🔼 GShare의 접근</h3>
+        <ul>
+          <li>분할(fractional)·전용(exclusive)을 한 클러스터에서 혼용</li>
+          <li>점유율(occupancy) 기반 과금 — 쓴 만큼 크레딧 차감</li>
+          <li>유휴 GPU는 자동 일시정지로 즉시 회수, 작업은 보존</li>
+          <li>계층 크레딧·예산 게이트·자원 정책으로 한도 관리</li>
+          <li>점유율을 고려한 bin-packing으로 빈 카드 보존</li>
+        </ul>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section id="features">
+  <div class="wrap">
+    <div class="eyebrow">핵심 기능</div>
+    <h2>분할 위에 얹은 운영 지능</h2>
+    <p class="sub">실제 GPU 분할은 HAMi와 전용 풀카드가 맡고, GShare는 그 위에서 배치·과금·회수를 통합합니다.</p>
+
+    <div class="grid3">
+      <div class="feat">
+        <div class="ic">🧩</div>
+        <h3>점유율을 고려한 bin-packing</h3>
+        <p>VRAM·코어 두 축의 잔여를 함께 보는 best-fit 배치. 가장 꽉 차는 카드로 통합해 빈 카드를 보존하고,
+           전용·대형 작업 수용력을 지킵니다. <code>spread</code> 정책도 토글 제공.</p>
+        <span class="badge">구현 완료</span>
+      </div>
+      <div class="feat">
+        <div class="ic">⏸️</div>
+        <h3>유휴 자동 일시정지</h3>
+        <p>유휴(util≈0) GPU 세션을 종료가 아닌 <b>자동 일시정지</b>로 회수합니다. 파드를 내려 물리 GPU를
+           반환하되 세션·볼륨·크레딧은 보존, 사용자는 언제든 재개합니다.</p>
+        <span class="badge">구현 완료</span>
+      </div>
+      <div class="feat">
+        <div class="ic">💾</div>
+        <h3>무손실 일시정지</h3>
+        <p>체크포인트(cuda-checkpoint + CRIU)로 GPU 메모리 상태를 보존한 채 카드를 반환하고, 재개 시
+           상태 그대로 복원합니다. 모델 재로딩 비용 없는 회수.</p>
+        <span class="badge design">설계 단계</span>
+      </div>
+      <div class="feat">
+        <div class="ic">💳</div>
+        <h3>계층 크레딧 · 예산</h3>
+        <p>시스템→조직→부서→개인으로 크레딧을 배분하고, 세션은 본인 지갑에서만 과금. 범위별 예산 게이트로
+           초과를 차단/경보하고 월 자동 리필을 지원합니다.</p>
+        <span class="badge">구현 완료</span>
+      </div>
+      <div class="feat">
+        <div class="ic">📐</div>
+        <h3>자원 정책 · 한도</h3>
+        <p>동시 실행 수, 자원 총량, 유휴 타임아웃을 정책으로 통제. <b>사용자→부서→조직→공통</b> 순으로 해석해
+           조직마다 다른 운영 규칙을 적용합니다.</p>
+        <span class="badge">구현 완료</span>
+      </div>
+      <div class="feat">
+        <div class="ic">🖥️</div>
+        <h3>대화형 세션</h3>
+        <p>VSCode·JupyterLab·웹터미널을 1회용 링크로 즉시 접속. 대기열·우선순위 자동 배정, 볼륨/스냅샷,
+           감사 로그까지 콘솔 한 곳에서.</p>
+        <span class="badge">구현 완료</span>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section id="how">
+  <div class="wrap">
+    <div class="eyebrow">동작 방식</div>
+    <h2>세션 생성 한 번에 일어나는 일</h2>
+    <p class="sub">요청은 허용 검사를 순서대로 통과해야 기동되고, 그때부터 점유율 기반 과금이 시작됩니다.</p>
+
+    <div class="flow">
+      <div class="step"><div class="n">STEP 1</div><h3>선택</h3><p>오퍼링(GPU 모델·티어)·이미지·볼륨을 고르면 예상 크레딧을 표시.</p></div>
+      <div class="step"><div class="n">STEP 2</div><h3>허용 검사</h3><p>정책 한도 → 예산 → 크레딧 hold → 점유율을 고려한 VRAM 예약 순으로 통과.</p></div>
+      <div class="step"><div class="n">STEP 3</div><h3>기동</h3><p>제어 영역이 CR 적용 → operator가 파드/서비스/인그레스 생성.</p></div>
+      <div class="step"><div class="n">STEP 4</div><h3>과금·회수</h3><p>running 콜백부터 과금 시작, 유휴 시 자동 일시정지로 GPU 반환.</p></div>
+    </div>
+  </div>
+</section>
+
+<section id="arch">
+  <div class="wrap">
+    <div class="eyebrow">아키텍처</div>
+    <h2>제어 영역 · 실행 영역 분리</h2>
+    <p class="sub">돈과 상태 결정은 제어 영역(backend)이 책임지고, 실제 쿠버네티스 실행은 클러스터별 operator가 맡습니다.
+      제어 영역은 kubeconfig로 외부 GPU 클러스터에도 세션을 적용할 수 있습니다.</p>
+
+    <div class="arch">
+<pre>
+  사용자 / 관리자
+      │ 브라우저
+      ▼
+  콘솔 (frontend, React SPA)            ── 사용자·관리자 화면 (REST/SSE)
+      │ REST/SSE
+      ▼
+  제어 영역 (backend, FastAPI)          ── 상태·돈의 중심: 인증·권한, 크레딧/예산,
+      │  ├ gshare-api    세션 허용 검사·CRUD·토큰         카탈로그/정책, 스케줄링
+      │  └ gshare-worker  과금·예산 롤업·대기열·리필
+      │ GShareSession CR 적용 (kubeconfig)      ▲ 서명된 상태/인벤토리 콜백 (내부 JWT)
+      ▼                                         │
+  operator (Go, 클러스터별) ──▶ Pod / Service / Ingress (gshare-sessions ns)
+      │                                  세션 파드 = 대화형 환경(VSCode/Jupyter/터미널)
+      ▼
+  HAMi + GPU 노드                       ── 실제 GPU 분할(gpumem/gpucores) · 전용 풀카드
+
+  postgres(상태·원장) · redis(큐·토큰·락)
+</pre>
+      <div class="cap">분할 메커니즘은 HAMi(분할 vGPU)·전용 풀카드에 위임하고, GShare는 그 위에서 점유율 기반 배치·과금·유휴 회수를 통합 관리합니다.</div>
+    </div>
+  </div>
+</section>
+
+<section id="roles">
+  <div class="wrap">
+    <div class="eyebrow">역할 기반 운영</div>
+    <h2>전사부터 개인까지, 범위에 맞게</h2>
+    <p class="sub">하나의 콘솔에서 역할 범위에 따라 메뉴와 데이터가 제한됩니다.</p>
+
+    <table class="roles">
+      <thead>
+        <tr><th>역할</th><th>범위</th><th>할 수 있는 일</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>슈퍼관리자</td><td>전사</td><td>조직·오퍼링·정책·클러스터·노드·이미지, 크레딧 충전</td></tr>
+        <tr><td>조직관리자</td><td>자기 조직</td><td>부서·사용자 관리, 조직→부서 예산 배분, 조직 세션 관제·감사</td></tr>
+        <tr><td>부서관리자</td><td>자기 부서</td><td>부서원 관리, 부서→개인 배분, 부서 세션 관제</td></tr>
+        <tr><td>일반 사용자</td><td>본인</td><td>세션 생성·접속, 지갑·크레딧 요청, 볼륨·스냅샷</td></tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<footer>
+  <div class="wrap">
+    <div class="brand"><span style="opacity:.8">GShare</span> · Kubernetes GPU Sharing Platform</div>
+    <div>
+      <a href="https://github.com/boanlab/gShare/blob/main/docs/user-manual.md" target="_blank" rel="noopener">사용자 매뉴얼</a> ·
+      <a href="https://github.com/boanlab/gShare/blob/main/docs/admin-manual.md" target="_blank" rel="noopener">관리자 매뉴얼</a> ·
+      <a href="https://github.com/boanlab/gShare/tree/main/docs/paper" target="_blank" rel="noopener">설계 문서</a> ·
+      <a href="https://github.com/boanlab/gShare/blob/main/LICENSE" target="_blank" rel="noopener">Apache-2.0</a>
+    </div>
+  </div>
+</footer>
+
+</body>
+</html>

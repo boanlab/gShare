@@ -1,0 +1,36 @@
+name: Feature request
+description: Propose a capability or a change in behaviour.
+labels: [enhancement, needs-triage]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: The situation that is painful today. Describe the need, not the solution.
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed change
+      description: What GShare would do instead, and which component would own it.
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Workarounds you have tried, and why they fall short.
+
+  - type: checkboxes
+    id: scope
+    attributes:
+      label: Scope check
+      description: |
+        GShare is deliberately interactive-session only — there is no API key, CLI, SDK,
+        or batch-job surface, and MIG partitioning is out of scope.
+      options:
+        - label: My request fits that scope, or explains why the boundary should move.
+          required: true

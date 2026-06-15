@@ -1,0 +1,64 @@
+# Kyverno: cosign signature verification in enforce mode, plus a trusted-registry allowlist.
+# This is not opt-in. An unsigned image, or one from outside the allowlist, is rejected at admission.
+# Allowlist: registry.gshare.internal/* (prj_* included) and ghcr.io/gshare/*.
+---
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: require-image-signature
+spec:
+  validationFailureAction: Enforce        # reject, not merely audit
+  webhookTimeoutSeconds: 30
+  background: false
+  rules:
+    - name: verify-gshare-images
+      match:
+        any:
+          - resources:
+              kinds: ["Pod"]
+              namespaces: ["gshare-sessions", "gshare-build"]
+      verifyImages:
+        # Cover the platform images as well as the per-user and per-project (prj_*) session and
+        # build images, so neither sessions nor builds are blocked.
+        - imageReferences:
+            - "ghcr.io/gshare/*"
+            - "registry.gshare.internal/*"
+            - "registry.gshare.internal/prj_*"   # per-user and per-group images
+          failureAction: Enforce
+          attestors:
+            - entries:
+                - keys:
+                    # The cosign public key. Hold it in a KMS, or prefer keyless OIDC.
+                    # In production, replace this with a key synced by external-secrets, or with
+                    # keyless verification against Rekor.
+                    publicKeys: |-
+                      -----BEGIN PUBLIC KEY-----
+                      MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEPLACEHOLDER_REPLACE_WITH_COSIGN_PUBKEY
+                      -----END PUBLIC KEY-----
+                    ctlog:
+                      ignoreSCT: true
+---
+# Reject images from any registry outside the trusted set.
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: restrict-image-registries
+spec:
+  validationFailureAction: Enforce
+  background: true
+  rules:
+    - name: allowed-registries
+      match:
+        any:
+          - resources:
+              kinds: ["Pod"]
+              namespaces: ["gshare-sessions", "gshare-build"]
+      validate:
+        message: >-
+          This image comes from a registry that is not allowed. Only ghcr.io/gshare/*,
+          registry.gshare.internal/*, and registry.gshare.internal/prj_* are permitted; the
+          canonical host is registry.gshare.internal.
+        pattern:
+          spec:
+            containers:
+              - image: "ghcr.io/gshare/* | registry.gshare.internal/* | registry.gshare.internal/prj_*"

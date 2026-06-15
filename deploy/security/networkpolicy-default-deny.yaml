@@ -1,0 +1,31 @@
+# default-deny + ingress allowlist.
+# Deny all ingress and egress for session pods, then allow ingress from the web proxy
+# (ingress-nginx) alone. The egress allowlist lives in networkpolicy-session-egress.yaml.
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-all
+  namespace: gshare-sessions
+spec:
+  podSelector: {}                       # every pod in the namespace
+  policyTypes: ["Ingress", "Egress"]
+---
+# Ingress allowlist: ingress-nginx, the web proxy, and nothing else.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: session-ingress-allow
+  namespace: gshare-sessions
+spec:
+  podSelector:
+    matchLabels: { gshare.io/workload: session }
+  policyTypes: ["Ingress"]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels: { kubernetes.io/metadata.name: ingress-nginx }
+      ports:
+        - { protocol: TCP, port: 8080 }   # code-server (/proxy/{cr}/code)
+        - { protocol: TCP, port: 8888 }   # jupyter     (/proxy/{cr}/lab)
+        - { protocol: TCP, port: 7681 }   # the ttyd terminal, at /proxy/{cr}/terminal

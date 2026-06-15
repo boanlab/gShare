@@ -1,0 +1,59 @@
+{{- if .Values.controlPlane.enabled }}
+# gshare-worker — Python batch: per-minute billing consume/settle, queue dequeue, idle reaper.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: gshare-worker
+  namespace: {{ .Values.global.namespaces.system }}
+  labels:
+    {{- include "gshare.labels" . | nindent 4 }}
+    app.kubernetes.io/name: gshare-worker
+spec:
+  replicas: {{ .Values.worker.replicas }}
+  selector:
+    matchLabels:
+      {{- include "gshare.selectorLabels" (dict "component" "gshare-worker") | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "gshare.labels" . | nindent 8 }}
+        {{- include "gshare.selectorLabels" (dict "component" "gshare-worker") | nindent 8 }}
+    spec:
+      serviceAccountName: {{ .Values.serviceAccounts.controller }}
+      {{- include "gshare.imagePullSecrets" . | nindent 6 }}
+      securityContext:
+        {{- include "gshare.podSecurityContext" . | nindent 8 }}
+      containers:
+        - name: worker
+          image: {{ include "gshare.image" (dict "img" .Values.images.worker "root" $) }}
+          imagePullPolicy: {{ .Values.images.worker.pullPolicy }}
+          securityContext:
+            {{- include "gshare.containerSecurityContext" . | nindent 12 }}
+          command: ["python", "-m", "app.workers.runner"]
+          envFrom:
+            - configMapRef: { name: gshare-config }
+          env:
+            # The app reads only GSHARE_-prefixed env (pydantic env_prefix).
+            - name: GSHARE_DATABASE_URL
+              valueFrom: { secretKeyRef: { name: {{ .Values.postgres.credentialsSecret }}, key: uri } }
+            {{- with .Values.worker.gracePeriodSec }}
+            # Credit-exhaustion grace window (sec) — graceful pause/yield past this. (gpu-yield-lending)
+            - name: GSHARE_GRACE_PERIOD_SEC
+              value: {{ . | quote }}
+            {{- end }}
+            {{- with .Values.worker.yieldReservationTtlSec }}
+            # In-place yield resume-reservation TTL (sec) — cold demotion past this. (gpu-yield-lending)
+            - name: GSHARE_YIELD_RESERVATION_TTL_SEC
+              value: {{ . | quote }}
+            {{- end }}
+          volumeMounts:
+            - { name: tmp, mountPath: /tmp }
+            {{- include "gshare.controllerTokenVolumeMount" . | nindent 12 }}
+          resources:
+            {{- toYaml .Values.worker.resources | nindent 12 }}
+      volumes:
+        - name: tmp
+          emptyDir: {}
+        {{- include "gshare.controllerTokenVolume" . | nindent 8 }}
+
+{{- end }}

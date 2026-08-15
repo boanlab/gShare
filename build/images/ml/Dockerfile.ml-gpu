@@ -5,7 +5,7 @@
 # Build context: build/images, so session-base/entrypoint.sh can be shared.
 FROM codercom/code-server:latest AS cs
 
-FROM nvidia/cuda:12.4.1-cudnn-runtime-ubuntu22.04
+FROM nvidia/cuda:13.3.1-cudnn-runtime-ubuntu22.04
 ARG TTYD_VERSION=1.7.7
 
 COPY --from=cs /usr/lib/code-server /usr/lib/code-server

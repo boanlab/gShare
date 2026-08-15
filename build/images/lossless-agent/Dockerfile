@@ -7,7 +7,7 @@
 # The agent (1) returns the GPU's VRAM with NVIDIA cuda-checkpoint, and (2) checkpoints the container
 # by calling `ctr` over the containerd socket.
 # Design: see docs/paper/manuscript, §Implementation.
-FROM ubuntu:22.04
+FROM ubuntu:26.04
 
 ARG CUDA_CHECKPOINT_URL=https://github.com/NVIDIA/cuda-checkpoint/raw/main/bin/x86_64_Linux/cuda-checkpoint
 # A ctr client matching the host's containerd, taken from bin/ctr in the release tarball. Pinned to

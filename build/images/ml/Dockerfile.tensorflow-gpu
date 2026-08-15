@@ -4,7 +4,7 @@
 # Build context: build/images, so session-base/entrypoint.sh can be shared.
 FROM codercom/code-server:latest AS cs
 
-FROM tensorflow/tensorflow:2.18.0-gpu
+FROM tensorflow/tensorflow:2.21.0-gpu
 ARG TTYD_VERSION=1.7.7
 
 COPY --from=cs /usr/lib/code-server /usr/lib/code-server

@@ -1,6 +1,6 @@
 # GShare cluster operator image.
 # Build the manager binary with a multi-stage build for a minimal distroless runtime.
-FROM golang:1.22 AS builder
+FROM golang:1.26 AS builder
 ARG TARGETOS
 ARG TARGETARCH
 

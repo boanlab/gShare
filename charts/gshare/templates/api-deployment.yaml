@@ -19,7 +19,17 @@ spec:
       labels:
         {{- include "gshare.labels" . | nindent 8 }}
         {{- include "gshare.selectorLabels" (dict "component" "gshare-api") | nindent 8 }}
+      annotations:
+        # Roll the pods whenever the ConfigMap changes; a Deployment whose template is untouched
+        # would otherwise keep serving the old environment after `helm upgrade`.
+        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+        # GET /metrics is served by the pod but NOT routed by the ingress; Prometheus scrapes
+        # the pod directly through these annotations.
+        prometheus.io/scrape: "true"
+        prometheus.io/port: {{ .Values.api.port | quote }}
+        prometheus.io/path: /metrics
     spec:
+      {{- include "gshare.controlPlaneNodeSelector" . | nindent 6 }}
       serviceAccountName: {{ .Values.serviceAccounts.controller }}
       {{- include "gshare.imagePullSecrets" . | nindent 6 }}
       securityContext:

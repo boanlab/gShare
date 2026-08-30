@@ -137,6 +137,24 @@ the public `:latest` images.
 > use `make prod-deploy` with
 > [`deploy/values/dockerhub.yaml`](../deploy/values/dockerhub.yaml).
 
+**Optional add-ons** (each independent; enable via the overlay — every knob is a commented
+example in [`domain.example.yaml`](../deploy/values/domain.example.yaml)):
+
+- **Monitoring** — `make deploy-monitoring` installs Prometheus with the dcgm / node /
+  kube-state exporters. It powers the admin monitoring page, the per-session live-usage
+  panels, and (via `operator.prometheusUrl`) the idle reaper's utilisation source — on a
+  cluster with more than one GPU node, set `prometheusUrl`; the HAMi-monitor fallback
+  round-robins per-node pods and idle sessions are then never auto-paused.
+- **Mixed GPU fleet** — different card models in one cluster need
+  `operator.perCardMode: true`, which pins each session pod to the exact card the ledger
+  reserved. Without it a session priced for one model can land on another.
+- **LAN image registry** — `deploy/registry/registry.yaml` plus per-node trust; see
+  [`cluster-setup.md` §Local registry](./cluster-setup.md#local-registry-optional). Set
+  `api.buildRegistry` so console-driven image builds push there too.
+- **Real volume quotas** — the ZFS storage node
+  ([`cluster-setup.md` §Storage node](./cluster-setup.md#storage-node-optional-volumes-with-a-real-quota));
+  then `operator.volumeStorageClass: gshare-data`.
+
 ### Step 3 — verify and log in
 
 ```bash
@@ -161,6 +179,9 @@ an administrator you only edit and extend it, from the console or through
   The seeded rates are suggestions — adjust them in the console.
 - An **image** is the session container image. The GShare session images ship JupyterLab,
   a web terminal, and code-server.
+- Users are not limited to the shared catalogue: from **내 이미지 / My images** any member can
+  build an image (an inline Dockerfile or a public git repository) or import a public registry
+  reference. Those rows are private to their owner, and one member may hold at most 20 of them.
 
 The operator reports GPU inventory automatically, so nodes and devices (for example
 RTX 4090) appear on the infrastructure screens without further setup.

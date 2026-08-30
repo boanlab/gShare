@@ -123,6 +123,7 @@ spec:
     spec:
       serviceAccountName: gshare-operator-token-provisioner
       restartPolicy: Never
+      {{- include "gshare.controlPlaneNodeSelector" . | nindent 6 }}
       securityContext:
         {{- include "gshare.podSecurityContext" . | nindent 8 }}
       {{- include "gshare.imagePullSecrets" . | nindent 6 }}
@@ -174,6 +175,7 @@ spec:
         spec:
           serviceAccountName: gshare-operator-token-provisioner
           restartPolicy: Never
+          {{- include "gshare.controlPlaneNodeSelector" . | nindent 10 }}
           securityContext:
             {{- include "gshare.podSecurityContext" . | nindent 12 }}
           {{- include "gshare.imagePullSecrets" . | nindent 10 }}

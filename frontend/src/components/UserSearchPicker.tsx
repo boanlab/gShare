@@ -31,18 +31,18 @@ export function UserSearchPicker({
       <input
         id={id}
         type="search"
-        className="w-full px-3 py-2 border border-border rounded-lg bg-surface-2 text-[13px]"
+        className="w-full px-3 py-2 border border-border rounded-ctl bg-surface-2 text-sm"
         placeholder={t('userPicker.placeholder')}
         value={q}
         onChange={(e) => setQ(e.target.value)}
       />
       <ul
-        className="mt-1.5 max-h-44 overflow-auto rounded-lg border border-border divide-y divide-border"
+        className="mt-1.5 max-h-44 overflow-auto rounded-card border border-border divide-y divide-border"
         aria-live="polite"
         aria-label={t('userPicker.resultsLabel')}
       >
         {list.length === 0 ? (
-          <li className="px-3 py-2 text-[12px] text-muted">
+          <li className="px-3 py-2 text-xs text-muted">
             {isFetching ? t('userPicker.searching') : (emptyHint ?? t('userPicker.empty'))}
           </li>
         ) : (
@@ -51,9 +51,9 @@ export function UserSearchPicker({
               <button
                 type="button"
                 onClick={() => onSelect(u.id)}
-                className={`w-full text-left px-3 py-2 text-[13px] hover:bg-surface-2 ${selectedId === u.id ? 'bg-primary-soft text-primary font-semibold' : ''}`}
+                className={`w-full text-left px-3 py-2 text-sm hover:bg-surface-2 ${selectedId === u.id ? 'bg-primary-soft text-primary font-semibold' : ''}`}
               >
-                {u.name} <span className="text-muted font-mono text-[12px]">{u.email}</span>
+                {u.name} <span className="text-muted font-mono text-xs">{u.email}</span>
               </button>
             </li>
           ))

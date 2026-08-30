@@ -4,15 +4,19 @@ import { useTranslation } from 'react-i18next';
 import { useAuthStore } from '@/auth/authStore';
 import { useUiStore } from '@/store/uiStore';
 import { LanguageToggle } from '@/components/LanguageToggle';
+import { AppFooter } from '@/components/Layout';
 import { Field, DisabledReason } from '@/components/Field';
 import { useDocumentTitle } from '@/hooks/useDocumentTitle';
+import { asApiError, humanizeError } from '@/lib/errors';
+import { ArrowLeft, GraphicsCard } from '@/components/icons';
 
 /** Shared shell for the signed-out screens: a landmark, a heading, and the language control. */
 function AuthShell({ title, children }: { title: string; children: React.ReactNode }) {
   useDocumentTitle(title);
   return (
-    <main className="min-h-full grid place-items-center bg-bg p-4">
-      <div className="w-full max-w-[380px]">{children}</div>
+    <main className="min-h-full flex flex-col bg-bg p-4">
+      <div className="w-full max-w-[392px] m-auto">{children}</div>
+      <AppFooter />
     </main>
   );
 }
@@ -38,14 +42,18 @@ export function Login() {
     setBusy(true);
     try {
       await loginPassword(email, pw);
-      // A first sign-in — an account an administrator registered, or the bootstrap account —
+      // A first sign-in - an account an administrator registered, or the bootstrap account -
       // has to change its password before going anywhere else.
       const mustChange = useAuthStore.getState().claims.must_change_password;
       navigate(mustChange ? '/change-password' : returnUrl, { replace: true });
-    } catch {
-      // Inline as well as a toast: the message has to outlast the toast.
-      setError(t('auth.invalidCredentials'));
-      pushToast('error', t('auth.invalidCredentials'));
+    } catch (e) {
+      // Inline as well as a toast: the message has to outlast the toast. A 401 stays the generic
+      // wrong-credentials text; anything else (429 rate-limit, login disabled) shows its real
+      // message so the user does not keep retyping a correct password.
+      const err = asApiError(e);
+      const msg = err.status && err.status !== 401 ? humanizeError(err) : t('auth.invalidCredentials');
+      setError(msg);
+      pushToast('error', msg);
     } finally {
       setBusy(false);
     }
@@ -53,13 +61,15 @@ export function Login() {
 
   return (
     <AuthShell title={t('auth.signIn')}>
-      <form className="gs-card space-y-3" onSubmit={handlePassword} noValidate>
-        <div className="flex items-center gap-2 font-extrabold text-lg mb-2">
-          <span className="w-[22px] h-[22px] rounded-md bg-primary inline-block" aria-hidden="true" />
-          <h1 className="text-lg font-extrabold">GShare</h1>
+      <form className="gs-card space-y-4 shadow-raised" onSubmit={handlePassword} noValidate>
+        <div className="flex items-center gap-2.5 mb-4">
+          <span className="w-[22px] h-[22px] rounded-ctl bg-primary grid place-items-center shrink-0" aria-hidden="true">
+            <GraphicsCard size={14} className="text-on-primary" />
+          </span>
+          <h1 className="text-lg font-bold tracking-[-0.02em]">gShare</h1>
           <span className="ml-auto"><LanguageToggle /></span>
         </div>
-        {error && <p role="alert" className="text-danger text-[12.5px]">{error}</p>}
+        {error && <p role="alert" className="text-danger text-xs">{error}</p>}
         <Field label={t('auth.email')} required error={emailMalformed ? t('auth.emailMalformed') : null}>
           {(ids) => (
             <input
@@ -134,13 +144,15 @@ export function ChangePassword() {
 
   return (
     <AuthShell title={t('auth.changePassword')}>
-      <form className="gs-card space-y-3" onSubmit={submit} noValidate>
-        <div className="flex items-center gap-2 mb-1">
-          <span className="w-[22px] h-[22px] rounded-md bg-primary inline-block" aria-hidden="true" />
-          <h1 className="text-lg font-extrabold">{t('auth.changePassword')}</h1>
+      <form className="gs-card space-y-4 shadow-raised" onSubmit={submit} noValidate>
+        <div className="flex items-center gap-2.5 mb-3">
+          <span className="w-[22px] h-[22px] rounded-ctl bg-primary grid place-items-center shrink-0" aria-hidden="true">
+            <GraphicsCard size={14} className="text-on-primary" />
+          </span>
+          <h1 className="text-lg font-bold tracking-[-0.02em]">{t('auth.changePassword')}</h1>
           <span className="ml-auto"><LanguageToggle /></span>
         </div>
-        {mustChange && <p className="text-warn text-[12px]">{t('auth.firstLogin')}</p>}
+        {mustChange && <p className="text-warn text-xs">{t('auth.firstLogin')}</p>}
         {!mustChange && (
           <Field label={t('auth.currentPassword')} required>
             {(ids) => (
@@ -183,7 +195,10 @@ function ErrorScreen({ code, title, hint }: { code: string; title: string; hint?
         {hint && <p className="text-muted mt-1">{hint}</p>}
         <div className="mt-4 flex items-center justify-center gap-2 flex-wrap">
           <Link to="/" className="gs-btn gs-btn-primary">{t('auth.backToDashboard')}</Link>
-          <button type="button" className="gs-btn" onClick={() => window.history.back()}>← {t('common.back')}</button>
+          <button type="button" className="gs-btn" onClick={() => window.history.back()}>
+            <ArrowLeft size={14} aria-hidden="true" />
+            {t('common.back')}
+          </button>
           <LanguageToggle />
         </div>
       </div>

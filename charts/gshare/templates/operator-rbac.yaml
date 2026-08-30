@@ -60,6 +60,9 @@ rules:
   - apiGroups: [""]
     resources: ["nodes"]
     verbs: ["patch"]                        # cordon (unschedulable) only
+  - apiGroups: [""]
+    resources: ["nodes/proxy"]              # kubelet /stats/summary: per-PVC used bytes for the volume ledger
+    verbs: ["get"]
   - apiGroups: ["batch"]
     resources: ["jobs"]                     # lossless pause: the privileged agent Job (checkpoint and restore)
     verbs: ["get", "list", "watch", "create", "delete"]
@@ -88,6 +91,39 @@ subjects:
     name: {{ .Values.serviceAccounts.operator }}
     namespace: {{ .Values.global.namespaces.system }}
 ---
+# ── Console image builds: kaniko Jobs run in the infra namespace (Jobs/pods are covered by the
+#     cluster-scope rules above); this Role adds only the Dockerfile ConfigMaps and log reads. ──
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: gshare-build-manager
+  namespace: {{ .Values.global.namespaces.infra }}
+  labels:
+    {{- include "gshare.labels" . | nindent 4 }}
+rules:
+  - apiGroups: [""]
+    resources: ["configmaps"]               # per-build Dockerfile; deleted when the build finishes
+    verbs: ["create", "get", "delete"]
+  - apiGroups: [""]
+    resources: ["pods/log"]                 # kaniko log tail for the console's build-log drawer
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: gshare-build-manager
+  namespace: {{ .Values.global.namespaces.infra }}
+  labels:
+    {{- include "gshare.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: gshare-build-manager
+subjects:
+  - kind: ServiceAccount
+    name: {{ .Values.serviceAccounts.operator }}
+    namespace: {{ .Values.global.namespaces.system }}
+---
 # ── (B) Session lifecycle: a Role confined to the gshare-sessions namespace, which keeps every
 #        write inside it. ──
 apiVersion: rbac.authorization.k8s.io/v1
@@ -99,14 +135,20 @@ metadata:
     {{- include "gshare.labels" . | nindent 4 }}
 rules:
   - apiGroups: [""]
-    resources: ["pods", "services", "configmaps", "persistentvolumeclaims"]
+    resources: ["pods", "services", "configmaps"]
     verbs: ["create", "get", "list", "watch", "delete"]
+  - apiGroups: [""]
+    resources: ["persistentvolumeclaims"]   # session volumes: provisioned, grown on quota approval, reclaimed on delete
+    verbs: ["create", "get", "list", "watch", "patch", "delete"]
   - apiGroups: ["networking.k8s.io"]
     resources: ["ingresses"]
     verbs: ["create", "get", "list", "watch", "delete"]
   - apiGroups: [""]
     resources: ["secrets"]                  # the per-session ses-<id>-secret only
     verbs: ["create", "get", "delete"]      # no list, watch, or update, and no wildcard
+  - apiGroups: [""]
+    resources: ["events"]                   # eviction cause recovery: a gracefully-evicted pod ends
+    verbs: ["get", "list"]                  # Succeeded with no reason; the kubelet Event is the only evidence
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
@@ -134,10 +176,10 @@ metadata:
     {{- include "gshare.labels" . | nindent 4 }}
 rules:
   - apiGroups: ["gshare.io"]
-    resources: ["gsharesessions"]
+    resources: ["gsharesessions", "gpumodechanges", "gshareimagebuilds"]
     verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
   - apiGroups: ["gshare.io"]
-    resources: ["gsharesessions/status"]
+    resources: ["gsharesessions/status", "gpumodechanges/status", "gshareimagebuilds/status"]
     verbs: ["get"]                          # read status only; the ledger is written back by the status callback
 ---
 apiVersion: rbac.authorization.k8s.io/v1
@@ -166,10 +208,10 @@ metadata:
     {{- include "gshare.labels" . | nindent 4 }}
 rules:
   - apiGroups: ["gshare.io"]
-    resources: ["gsharesessions"]
+    resources: ["gsharesessions", "gpumodechanges", "gshareimagebuilds"]
     verbs: ["get", "list", "watch", "update", "patch"]
   - apiGroups: ["gshare.io"]
-    resources: ["gsharesessions/status", "gsharesessions/finalizers"]
+    resources: ["gsharesessions/status", "gsharesessions/finalizers", "gpumodechanges/status", "gshareimagebuilds/status"]
     verbs: ["get", "update", "patch"]
   - apiGroups: ["coordination.k8s.io"]
     resources: ["leases"]
@@ -235,13 +277,13 @@ metadata:
     {{- include "gshare.labels" . | nindent 4 }}
 rules:
   - apiGroups: [""]
-    resources: ["pods", "services", "secrets"]
+    resources: ["pods", "services", "secrets", "persistentvolumeclaims"]
     verbs: ["get", "list", "watch"]
   - apiGroups: ["networking.k8s.io"]
     resources: ["ingresses"]
     verbs: ["get", "list", "watch"]
   - apiGroups: ["gshare.io"]
-    resources: ["gsharesessions", "gsharesessions/status"]
+    resources: ["gsharesessions", "gsharesessions/status", "gpumodechanges", "gpumodechanges/status", "gshareimagebuilds", "gshareimagebuilds/status"]
     verbs: ["get", "list", "watch"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
@@ -254,6 +296,37 @@ roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: ClusterRole
   name: gshare-operator-watch
+subjects:
+  - kind: ServiceAccount
+    name: {{ .Values.serviceAccounts.operator }}
+    namespace: {{ .Values.global.namespaces.system }}
+---
+# ── operator: restarting the HAMi device plugin after a card-mode change (mig-agent) ──
+# Deleting the device-plugin pod makes the DaemonSet recreate it, refreshing the
+# hami.io/node-nvidia-register annotation with the card's new per-card mode.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: gshare-operator-deviceplugin-restart
+  namespace: kube-system
+  labels:
+    {{- include "gshare.labels" . | nindent 4 }}
+rules:
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "watch", "delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: gshare-operator-deviceplugin-restart
+  namespace: kube-system
+  labels:
+    {{- include "gshare.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: gshare-operator-deviceplugin-restart
 subjects:
   - kind: ServiceAccount
     name: {{ .Values.serviceAccounts.operator }}

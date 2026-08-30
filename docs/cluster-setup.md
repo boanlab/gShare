@@ -16,7 +16,7 @@ The stack it produces:
 | GPU partitioning | **HAMi** — device plugin and scheduler, `nvidia.com/gpumem` and `gpucores` |
 | Ingress | **ingress-nginx** on NodePort 30080/30443, plain HTTP |
 | TLS | Terminated by **a reverse proxy in front**; the cluster stays HTTP internally |
-| Storage | **local-path** as the default StorageClass |
+| Storage | **local-path** as the default StorageClass; optionally a **storage node** (ZFS + NFS behind democratic-csi) for user volumes with a real, df-visible quota |
 
 ## Recommended: one command from a control machine
 
@@ -39,6 +39,11 @@ MASTER_NODE=ubuntu@10.0.0.10
 WORKER_NODES=ubuntu@10.10.0.196:exclusive,ubuntu@10.10.0.197:fractional
 # Optional GPU-less workers, comma separated. Labelled `cpu`; the NVIDIA runtime is not installed.
 # CPU_WORKERS=ubuntu@10.10.0.200,ubuntu@10.10.0.201
+# Optional storage node: a ZFS pool on the given (empty) block device, exported over NFS through
+# democratic-csi as StorageClass gshare-data. Labelled and tainted `storage`.
+# STORAGE_NODE=ubuntu@10.10.0.194:/dev/vdb
+# Optional plain-HTTP registry on the LAN, configured for containerd on every node.
+# LOCAL_REGISTRY=10.10.0.191:5001
 # SSH_OPTS="-i ~/.ssh/id_ed25519 -o StrictHostKeyChecking=accept-new"   # optional
 ```
 
@@ -49,7 +54,8 @@ join (GPU and CPU in parallel) → addons on the control plane → node labellin
 plane and CPU workers as `cpu`, GPU workers with their configured mode) → verification.
 
 `hack/cluster-info` contains real addresses and is git-ignored; only
-`cluster-info.example` is tracked.
+`cluster-info.example` is tracked. So is `hack/storage-csi-key`, the SSH key pair the script
+generates for democratic-csi when a storage node is configured.
 
 > To run the steps by hand on each node, use the same subcommands directly — see below.
 
@@ -131,6 +137,72 @@ already applied the modes from `cluster-info`** — this step is only for the ma
 Checks that nodes are Ready, that `nvidia.com/gpu` and `nvidia.com/gpumem` capacity is
 advertised, that the HAMi, ingress, flannel, and local-path pods are Running, and that a
 default StorageClass exists.
+
+### Storage node (optional): volumes with a real quota
+
+local-path serves RWO only and enforces nothing: a 50 GiB volume shows the node's whole disk in
+`df` and can fill it. A storage node fixes both. `STORAGE_NODE=user@ip:/dev/<device>` in
+`cluster-info` makes `up` run, after the addons:
+
+1. **`storage <device>`** on that node — installs `zfsutils-linux` and `nfs-kernel-server`,
+   creates the pool `gshare` on the device (taken whole; several devices as a mirror or raidz via
+   `STORAGE_VDEVS`), the datasets `gshare/volumes` and `gshare/snapshots`, caps the ARC at
+   `ZFS_ARC_MAX_MB` (3 GiB), and creates the `gshare-csi` account: SSH key only, sudo restricted to
+   the zfs/exportfs/chown commands the driver runs.
+2. **`storage-csi <ip> <key>`** on the control plane — installs democratic-csi
+   (`zfs-generic-nfs`, values in `deploy/storage/democratic-csi-values.yaml`) and the
+   StorageClass **`gshare-data`**: one dataset per PVC with `refquota` = the claim, so inside a
+   session `df` shows exactly the quota and writes past it fail with `ENOSPC`; RWO, RWX, and ROX
+   all come from this one class; `allowVolumeExpansion` for approved quota increases.
+3. **`label <node> storage`** — `gshare.io/role=storage` plus a `NoSchedule` taint, so sessions and
+   the control plane never land on it.
+
+Every node gets `nfs-common` from `prereqs`. Then point the operator at the class:
+`--set operator.volumeStorageClass=gshare-data` (or uncomment it in the values overlay). The
+operator reports each volume PVC to the control plane every `operator.volumeSyncInterval` (5m):
+used bytes for the ledger, approved quota growth applied to the claim, and PVCs of volumes deleted
+more than `api.volumeReclaimGraceHours` (24h) ago reclaimed — dataset included.
+
+By hand, in that order: `sudo STORAGE_CSI_PUBKEY="$(cat key.pub)" bash cluster-bootstrap.sh storage /dev/vdb`
+on the storage node, then `bash cluster-bootstrap.sh storage-csi <ip> key` and
+`bash cluster-bootstrap.sh label <node> storage` on the control plane.
+
+The pool is a single point of failure by design (no replication); take ZFS snapshots on the node
+and replicate with `zfs send` off-box for durability.
+
+### Local registry (optional)
+
+Session images are large (5–15 GiB); on a LAN a local registry beats pulling from Docker Hub on
+every node. Two pieces, both optional:
+
+1. **The registry itself** — `deploy/registry/registry.yaml` runs two plain-HTTP registries on the
+   storage node (`gshare.io/role=storage`): a push target on `:5000` for locally built session
+   images, and a docker.io **pull-through mirror** on `:5001` so public catalogue images are
+   fetched from the LAN after the first pull. `kubectl apply -f deploy/registry/registry.yaml`
+   (adjust the nodeSelector / storageClassName in the header if your layout differs).
+2. **Node trust** — containerd on every node must be told about them:
+
+   ```bash
+   sudo LOCAL_REGISTRY=<storage-ip>:5000 LOCAL_REGISTRY_MIRROR=<storage-ip>:5001 \
+        bash cluster-bootstrap.sh registry     # per node; idempotent
+   ```
+
+   This writes `/etc/containerd/certs.d/<host:port>/hosts.toml` (and a `docker.io` entry routing
+   pulls through the mirror, upstream as fallback) **and** sets `config_path` in `config.toml` —
+   containerd 2.x silently ignores `certs.d` without it, and every pull ends in
+   "server gave HTTP response to HTTPS client". The `up` path runs this on all nodes when
+   `LOCAL_REGISTRY` is set in `cluster-info`. Moving to TLS later means dropping the CA next to
+   `hosts.toml`; the layout stays.
+
+Build and push the catalogue images to it from any docker host that lists the registry under
+`"insecure-registries"`:
+
+```bash
+REG=<storage-ip>:5000 build/images/build.sh push   # builds all catalogue images, pushes to the LAN
+```
+
+then register them in the console (Images → the registry reference is
+`<storage-ip>:5000/gshare-session:<tag>`); nodes pull straight from the LAN.
 
 ## Next — deploy GShare
 

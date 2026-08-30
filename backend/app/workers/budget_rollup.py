@@ -2,9 +2,11 @@
 
 Accumulate Budget.spent_credit, evaluate 80/100% thresholds, fire BudgetAlert.
 
-spent_credit is the net consumed credit (Σ consume + Σ settle-refund corrections) charged to
-the wallets in the budget's scope within the current period window. Period boundaries are the
-1st-of-month 00:00 in the org timezone (default Asia/Seoul).
+spent_credit is the net consumed credit (Σ consume + Σ settle-refund corrections) attributed to
+the budget's scope within the current period window. Attribution is by SESSION, not by wallet:
+billing always charges the requester's personal wallet, so scope membership comes from the
+session's group (group scope) or the org's groups (org scope) via CreditTransaction.ref ==
+session id. Period boundaries are the 1st-of-month 00:00 in the org timezone (default Asia/Seoul).
 """
 from __future__ import annotations
 
@@ -20,7 +22,7 @@ from sqlalchemy import func, select
 
 from app.core.logging import get_logger
 from app.db.base import get_sessionmaker
-from app.db.models import Budget, CreditTransaction, CreditWallet, Organization, Project
+from app.db.models import Budget, CreditTransaction, Organization, Project, Session
 from app.domain.budget_service import BudgetService
 
 log = get_logger(__name__)
@@ -59,41 +61,31 @@ def _period_window(budget: Budget, org_tz: str) -> tuple[datetime, datetime]:
     return start_local.astimezone(UTC), end_local.astimezone(UTC)
 
 
-async def _scope_wallet_ids(db, budget: Budget) -> list[str]:
-    """Wallet ids whose spend rolls up into this budget.
-
-    project scope -> the project's wallet. org scope -> every project wallet under the org.
-    """
+async def _scope_group_ids(db, budget: Budget) -> list[str]:
+    """Group ids whose sessions roll up into this budget."""
     if budget.scope == "group":
-        owner_ids = [budget.scope_id]
-    else:  # org
-        proj_rows = await db.execute(
-            select(Project.id).where(Project.org_id == budget.scope_id)
-        )
-        owner_ids = [r[0] for r in proj_rows.all()]
-    if not owner_ids:
-        return []
-    wal_rows = await db.execute(
-        select(CreditWallet.id).where(
-            CreditWallet.owner_type == "group",
-            CreditWallet.owner_id.in_(owner_ids),
-        )
-    )
-    return [r[0] for r in wal_rows.all()]
+        return [budget.scope_id]
+    proj_rows = await db.execute(select(Project.id).where(Project.org_id == budget.scope_id))
+    return [r[0] for r in proj_rows.all()]
 
 
-async def _spent_in_period(db, wallet_ids: list[str], start: datetime, end: datetime) -> Decimal:
-    """Net spend in [start, end) for the given wallets (Σ consume + Σ settle refunds).
+async def _spent_in_period(db, group_ids: list[str], start: datetime, end: datetime) -> Decimal:
+    """Net spend in [start, end) attributed to the scope's sessions (Σ consume + Σ settle refunds).
 
-    consume amounts are negative; settle-time refunds are positive corrections. Net spend is
-    the negation of (consume + refund) sums so refunds reduce spent_credit. Free sessions write
-    no consume rows so they are auto-excluded.
+    Billing charges the requester's PERSONAL wallet, so wallets alone cannot scope a group/org
+    budget. consume and session-refund transactions carry ref == session id; joining through the
+    session's group_id is what attributes spend to the budget. consume amounts are negative and
+    refunds positive, so net spend is the negated sum. Free sessions write no consume rows and
+    are auto-excluded.
     """
-    if not wallet_ids:
+    if not group_ids:
         return _ZERO
     result = await db.execute(
-        select(func.coalesce(func.sum(CreditTransaction.amount), 0)).where(
-            CreditTransaction.wallet_id.in_(wallet_ids),
+        select(func.coalesce(func.sum(CreditTransaction.amount), 0))
+        .select_from(CreditTransaction)
+        .join(Session, Session.id == CreditTransaction.ref)
+        .where(
+            Session.group_id.in_(group_ids),
             CreditTransaction.type.in_(("consume", "refund")),
             CreditTransaction.created_at >= start,
             CreditTransaction.created_at < end,
@@ -145,8 +137,8 @@ async def run() -> None:
             for budget in budgets:
                 org_tz = await _org_tz_for(budget)
                 start, end = _period_window(budget, org_tz)
-                wallet_ids = await _scope_wallet_ids(db, budget)
-                spent = await _spent_in_period(db, wallet_ids, start, end)
+                group_ids = await _scope_group_ids(db, budget)
+                spent = await _spent_in_period(db, group_ids, start, end)
                 if budget.spent_credit != spent:
                     budget.spent_credit = spent
                     updated += 1

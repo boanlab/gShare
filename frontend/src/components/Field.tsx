@@ -26,7 +26,7 @@ export function Field({
 
   return (
     <div className={`block ${className}`}>
-      <label htmlFor={id} className="text-[12px] font-semibold text-muted">
+      <label htmlFor={id} className="text-xs font-semibold text-text">
         {label}
         {required && (
           <>
@@ -35,11 +35,11 @@ export function Field({
           </>
         )}
       </label>
-      <div className="mt-1">
+      <div className="mt-1.5">
         {children({ id, 'aria-describedby': describedBy, 'aria-invalid': !!error, 'aria-required': required, required })}
       </div>
-      {hint && <p id={hintId} className="text-muted text-[11px] mt-1">{hint}</p>}
-      {error && <p id={errorId} role="alert" className="text-danger text-[11.5px] mt-1">{error}</p>}
+      {hint && <p id={hintId} className="text-muted text-2xs mt-1.5">{hint}</p>}
+      {error && <p id={errorId} role="alert" className="text-danger text-2xs mt-1.5 font-medium">{error}</p>}
     </div>
   );
 }
@@ -49,7 +49,7 @@ export function DisabledReason({ reasons }: { reasons: string[] }) {
   const { t } = useTranslation();
   // Always rendered: the live region has to exist before its content changes.
   return (
-    <p role="status" aria-live="polite" className={reasons.length ? 'text-[11.5px] text-muted' : 'gs-sr-only'}>
+    <p role="status" aria-live="polite" className={reasons.length ? 'text-2xs text-muted' : 'gs-sr-only'}>
       {reasons.length ? `${t('common.blockedBy')} ${reasons.join(t('common.listSeparator'))}` : ''}
     </p>
   );

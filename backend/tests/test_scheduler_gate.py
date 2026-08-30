@@ -419,3 +419,35 @@ async def test_max_runtime_absent_when_no_policy(db):
     assert await crd._resolve_max_runtime_sec(spec) is None
     body = crd.build_object({**spec, "max_runtime_sec": None})
     assert "gshare.io/max-runtime-sec" not in body["metadata"].get("annotations", {})
+
+
+@pytest.mark.asyncio
+async def test_max_concurrent_counts_cpu_and_gpu_together(db, monkeypatch):
+    """A CPU session is still a session: with max_concurrent=1 a student holding a GPU session
+    must not be able to open a CPU one too — the console counts them together, so the cap must."""
+    from types import SimpleNamespace
+
+    from app.core.errors import QuotaExceeded
+    from app.domain.scheduler import SchedulerService
+
+    svc = SchedulerService(db)
+    principal = Principal(user_id="usr_x", global_role=None, global_roles=[], memberships={})
+    policy = SimpleNamespace(max_concurrent=1, max_queued=None, limits={})
+
+    async def _policy_for(self, req, p):
+        return policy
+
+    async def _count_active(self, p, req, exclude_session_id=None):
+        return 1                      # one GPU session already live
+
+    async def _sum_ok(self, req, p, pol, exclude_session_id=None):
+        return None
+
+    monkeypatch.setattr(SchedulerService, "_policy_for", _policy_for)
+    monkeypatch.setattr(SchedulerService, "_count_active", _count_active)
+    monkeypatch.setattr(SchedulerService, "_check_resource_sum", _sum_ok)
+
+    req = SimpleNamespace(resource_class="cpu", group_id=None, offering_id=None,
+                          cpu=1, mem_gb=1, disk_gb=1, gpu_mem_mb=None, gpu_cores=None)
+    with pytest.raises(QuotaExceeded):
+        await svc._check_cpu_quota(req, principal)

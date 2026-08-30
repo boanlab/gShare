@@ -16,3 +16,31 @@ bootstrapAdmin:
   email: admin@example.com        # the administrator's real email, which is the login id
   password: change-me-please      # initial password, forced to change at first login;
                                   # set to "" to have one generated
+
+# ── Optional per-deployment knobs (all have working chart defaults) ─────────────────────────────
+# Sessions are linked with https URLs by default; a plain-HTTP LAN deployment (no TLS proxy)
+# sets this so the connect buttons work:
+#   sessionUrlScheme: http     # (under global:)
+
+# Pin the whole control plane (api, worker, frontend, data tier) and the operator to one node,
+# so GPU and CPU workers carry only sessions:
+# controlPlane:
+#   nodeSelector: { "kubernetes.io/hostname": my-master }
+
+# operator:
+#   nodeSelector: { "kubernetes.io/hostname": my-master }
+#   # MIXED GPU FLEET (different models in one cluster): pin each session pod to the exact card
+#   # the ledger reserved (nvidia.com/use-gpuuuid). Without it hami-scheduler may place a session
+#   # priced for one model onto another. Single-model fleets can leave it off.
+#   perCardMode: true
+#   # Volumes with real quotas (the optional ZFS/democratic-csi storage node):
+#   volumeStorageClass: gshare-data
+#   # Idle-reaper utilization source. Prefer Prometheus (deploy/monitoring/monitoring-stack.yaml):
+#   # the HAMi monitor URL is a Service that round-robins per-node pods, which mis-reads other
+#   # nodes' cards as busy on multi-GPU-node clusters (idle sessions then never auto-pause).
+#   prometheusUrl: http://prometheus.monitoring.svc:9090
+
+# Admin image-build pipeline (console "build image") pushes here; also where locally built
+# session images live when you run the LAN registry (deploy/registry/registry.yaml):
+# api:
+#   buildRegistry: "<storage-node-ip>:5000/gshare-user"

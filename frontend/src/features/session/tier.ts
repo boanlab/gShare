@@ -28,10 +28,12 @@ export const GPU_TIERS: GpuTier[] = [
 ];
 
 // Tier to actual VRAM in MB: exclusive takes the full card; fractional snaps model capacity times
-// the fraction to a 512 MB boundary.
+// the fraction DOWN to a 512 MB boundary. Snapping down (not to nearest) is what lets the tiers
+// tile a card exactly: a real card reports slightly less than its nominal capacity (e.g. 48935 MB
+// on a "48 GB" card), so rounding a half tier up would leave two halves 217 MB short of fitting.
 export function tierVram(frac: number, modelMem: number, mode: string): number {
   if (mode === 'exclusive') return modelMem;
-  return Math.max(512, Math.round((modelMem * frac) / 512) * 512);
+  return Math.max(512, Math.floor((modelMem * frac) / 512) * 512);
 }
 
 export function tierCores(frac: number): number {

@@ -20,24 +20,26 @@ export interface ClusterMetrics {
   };
   sessions: { running: number; queued: number };
   credit: { consumed_last_24h: string; active_holds: string };
+  // Fleet host compute: promised to active sessions vs node capacity (quota-governed, not billed).
+  compute?: {
+    cpu: { used: number; total: number };
+    mem_gb: { used: number; total: number };
+    disk_gb: { used: number; total: number };
+  };
 }
 
+// Mirrors GET /dashboard/summary (see backend app/api/schemas/dashboard.py) — the same endpoint
+// the user dashboard reads. Fields here must exist in the API; a stale shape renders as zeros.
 export interface DashboardSummary {
-  as_of: string;
-  wallet?: {
-    wallet_id: string;
-    balance: string;
-    reserved: string;
-    available: string;
-    burn_rate_per_hour?: string;
-    projected_depletion_at?: string;
-  };
-  resource_usage?: {
-    running_sessions: number;
-    queued_sessions: number;
-    gpu_mem_mb_in_use: number;
-    gpu_cores_in_use: number;
-    active_minutes_today: number;
+  credit: { available: number | null; balance: number | null; reserved: number | null };
+  sessions: { running: number; active: number };
+  vram: { used_mb: number; total_mb: number };
+  regions: { model: string; total: number; free: number }[];
+  allocation: { instances: { used: number; total: number }; vram: { used_mb: number; total_mb: number } };
+  compute: {
+    cpu: { used: number; limit?: number | null };
+    mem_gb: { used: number; limit?: number | null };
+    disk_gb: { used: number; limit?: number | null };
   };
 }
 

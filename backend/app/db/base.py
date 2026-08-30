@@ -39,7 +39,17 @@ def get_engine():
     global _engine
     if _engine is None:
         # READ COMMITTED is Postgres default; per-wallet FOR UPDATE serializes credit.
-        _engine = create_async_engine(settings.DATABASE_URL, pool_pre_ping=True, future=True)
+        # Pool sizing is explicit: the SQLAlchemy default (5+10 per process) starves under load.
+        # SSE endpoints authenticate through get_sse_principal and hold no pooled connection for
+        # the stream's lifetime, so the pool only has to cover request-scoped work.
+        _engine = create_async_engine(
+            settings.DATABASE_URL,
+            pool_pre_ping=True,
+            future=True,
+            pool_size=settings.DB_POOL_SIZE,
+            max_overflow=settings.DB_MAX_OVERFLOW,
+            pool_recycle=1800,
+        )
     return _engine
 
 

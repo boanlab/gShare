@@ -1,4 +1,5 @@
 import { useTranslation } from 'react-i18next';
+import { X } from './icons';
 import { useUiStore, type Toast } from '@/store/uiStore';
 
 const KIND_CLASS: Record<Toast['kind'], string> = {
@@ -19,7 +20,7 @@ export function ToastHost() {
       {toasts.map((t) => (
         <div
           key={t.id}
-          className={`rounded-card border px-4 py-3 shadow-card text-[13px] font-semibold flex items-center gap-3 ${KIND_CLASS[t.kind]}`}
+          className={`rounded-card border px-4 py-3 shadow-card text-sm font-semibold flex items-center gap-3 ${KIND_CLASS[t.kind]}`}
           role="status"
         >
           <span className="flex-1 min-w-0">{t.message}</span>
@@ -39,7 +40,7 @@ export function ToastHost() {
             aria-label={dismissLabel}
             title={dismissLabel}
           >
-            ✕
+            <X size={14} aria-hidden="true" />
           </button>
         </div>
       ))}

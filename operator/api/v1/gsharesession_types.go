@@ -17,13 +17,24 @@ import (
 
 // VolumeSpec is one persistent volume to mount into the session Pod.
 type VolumeSpec struct {
-	// Name is the logical volume name (also used as the PVC/mount identifier).
+	// Name is the logical volume name — the control plane's volume id (vol_...). The operator
+	// sanitizes it to an RFC 1123 name for the PVC and the pod volume (lowercase, '_' -> '-').
 	Name string `json:"name"`
 	// MountPath is the in-container mount path, e.g. /workspace.
 	MountPath string `json:"mountPath"`
-	// Mode is the access mode: ReadWriteOnce | ReadWriteMany | ReadOnlyMany.
+	// Mode is the PVC access mode, from the volume's own access class (RWO/RWX/ROX):
+	// ReadWriteOnce | ReadWriteMany | ReadOnlyMany.
 	// +kubebuilder:validation:Enum=ReadWriteOnce;ReadWriteMany;ReadOnlyMany
 	Mode string `json:"mode"`
+	// ReadOnly mounts the volume read-only in THIS session, independent of the PVC access mode
+	// (a writable RWX volume can still be attached ro).
+	// +optional
+	ReadOnly bool `json:"readOnly,omitempty"`
+	// SizeGb is the provisioned quota backing the PVC the operator ensures. 0 falls back to a
+	// 10Gi default (older control planes that do not send it).
+	// +kubebuilder:validation:Minimum=0
+	// +optional
+	SizeGb int `json:"sizeGb,omitempty"`
 }
 
 // ConnectSpec is the source of per-session connection credentials, projected
@@ -102,6 +113,22 @@ type GShareSessionSpec struct {
 	// MigProfile is the MIG profile for mode=mig, e.g. "1g.5gb".
 	// +optional
 	MigProfile string `json:"migProfile,omitempty"`
+
+	// PinnedGpuUuid pins the session to the physical card the control plane's ledger reserved,
+	// via HAMi's nvidia.com/use-gpuuuid annotation. This makes the ledger the real placer: the
+	// card a session runs on is exactly the card that was reserved, and per-card pool membership
+	// stays a control-plane concern HAMi never needs to know about. Distinct from
+	// BorrowedGpuUuid (spot borrow: preemptible annotation + lend interlock).
+	// +optional
+	PinnedGpuUuid string `json:"pinnedGpuUuid,omitempty"`
+
+	// FullCard requests the whole physical card THROUGH hami-scheduler
+	// (gpumem-percentage=100 + gpucores=100) instead of the plain device plugin, so exclusive
+	// sessions flow through the same scheduler and UUID pinning as fractional ones and node-level
+	// exclusive pools are unnecessary. Set by the control plane for mode=exclusive when per-card
+	// pools are enabled.
+	// +optional
+	FullCard bool `json:"fullCard,omitempty"`
 
 	// Cpu is the vCPU (cores) allotment from the offering flavor — Pod request=limit (Guaranteed).
 	// +kubebuilder:validation:Minimum=0

@@ -5,9 +5,11 @@ POST /internal/audit/operator and are appended with a prev_hash/entry_hash chain
 
 Hash chain: every row stores ``prev_hash`` the previous row's entry_hash, or "GENESIS"
 for the first row and ``entry_hash`` = sha256 over a canonical serialization of
-(prev_hash + id + actor + action + target + detail + result + created_at). This mirrors the DB
-trigger ``audit_log_chain`` so the chain is verifiable independently of where it was written.
-The table is append-only (UPDATE/DELETE blocked by DB triggers); we never mutate prior rows.
+(prev_hash + id + actor + action + target + detail + result + created_at). The chain is
+maintained in application code only — there is NO database trigger and no DB-level append-only
+enforcement — so it detects casual tampering through this plane, not a hostile DBA. Retention
+pruning removes the oldest rows; the pruner records the surviving head's prev_hash in an
+``audit.retention`` entry, which verify_chain accepts as the new anchor.
 """
 from __future__ import annotations
 
@@ -164,6 +166,10 @@ class AuditService:
             group_id=group_id,
             prev_hash=prev_hash,
             entry_hash=entry_hash,
+            # The hashed timestamp MUST be the stored one: leaving created_at to the DB
+            # server_default stamps a slightly different time than the one hashed above, which
+            # made every chain verification fail with entry_hash_mismatch.
+            created_at=ts,
         )
         self.db.add(row)
         await self.db.flush()
@@ -182,8 +188,10 @@ class AuditService:
         """Walk the chain oldest->newest and recompute each entry_hash (integrity check).
 
         Returns ``{"ok": bool, "checked": int, "broken_at": id|None, "reason": str|None}``.
-        A break means a row was tampered with (entry_hash mismatch) or unlinked prev_hash !=
-        predecessor's entry_hash, which the append-only DB triggers should make impossible.
+        A break means a row was tampered with (entry_hash mismatch) or unlinked (prev_hash !=
+        predecessor's entry_hash). When retention has pruned the head, the surviving oldest row
+        no longer starts at GENESIS; its prev_hash is accepted iff it matches the anchor the
+        pruner recorded in the latest ``audit.retention`` entry.
         """
         stmt = select(AuditLog).order_by(AuditLog.created_at.asc(), AuditLog.id.asc())
         if limit is not None:
@@ -191,6 +199,18 @@ class AuditService:
         rows = list(await self.db.scalars(stmt))
 
         expected_prev = GENESIS
+        if rows and rows[0].prev_hash != GENESIS:
+            anchor_row = (
+                await self.db.scalars(
+                    select(AuditLog)
+                    .where(AuditLog.action == "audit.retention")
+                    .order_by(AuditLog.created_at.desc(), AuditLog.id.desc())
+                    .limit(1)
+                )
+            ).first()
+            anchor = (anchor_row.detail or {}).get("new_anchor_prev_hash") if anchor_row else None
+            if anchor == rows[0].prev_hash:
+                expected_prev = rows[0].prev_hash
         checked = 0
         for row in rows:
             created_at = row.created_at

@@ -20,6 +20,10 @@ spec:
         {{- include "gshare.labels" . | nindent 8 }}
         {{- include "gshare.selectorLabels" (dict "component" "gshare-operator") | nindent 8 }}
     spec:
+      {{- with .Values.operator.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
       serviceAccountName: {{ .Values.serviceAccounts.operator }}
       # The operator needs its service account token to reconcile in-cluster, so automounting stays
       # on — unlike the tenant session pods.
@@ -54,11 +58,11 @@ spec:
             # internal plane; the operator appends the paths. Left empty, BaseURL becomes "" and every
             # callback fails.
             - "--sot-endpoint={{ $cp }}"
-            # JWKS for verifying the internal JWT. The operator only verifies; it holds no private key.
-            - "--internal-jwks-url={{ .Values.operator.internalJwksUrl }}"
             # Cluster identifier: it names the leader lease (gshare-operator.<id>) and tags the
             # inventory and status callbacks. An empty value makes the lease name invalid.
             - "--cluster-id={{ .Values.operator.clusterId }}"
+            # Session ingresses must carry the same class as the console ingress.
+            - "--ingress-class={{ .Values.ingress.className }}"
             {{- with .Values.operator.losslessAgentImage }}
             # Node agent image for lossless pause and in-place yield. Empty disables the checkpointer,
             # and pause falls back to cold.
@@ -86,6 +90,38 @@ spec:
             # borrowing with proper accounting. Off, borrows use the device-plugin bypass and are
             # exclusive only.
             - "--hami-yield-extender"
+            {{- end }}
+            {{- if .Values.operator.perCardMode }}
+            # Per-card GPU pools: every GPU session flows through hami-scheduler pinned to the
+            # ledger-reserved card; exclusive is a 100% HAMi slice. Pair with the backend's
+            # GSHARE_PER_CARD_MODE (set from the same value in the ConfigMap).
+            - "--per-card-mode"
+            {{- end }}
+            {{- with .Values.operator.migAgentImage }}
+            # mig-agent image executing GpuModeChange card transitions (nvidia-smi -mig via a
+            # privileged node Job). Empty disables the controller; pool changes stay Pending.
+            - "--mig-agent-image={{ . }}"
+            {{- end }}
+            {{- with .Values.operator.kanikoImage }}
+            # kaniko executor for console image builds (GShareImageBuild); empty fails builds fast.
+            - "--kaniko-image={{ . }}"
+            {{- end }}
+            {{- if .Values.operator.buildInsecureRegistry }}
+            - "--build-insecure-registry=true"
+            {{- end }}
+            {{- with .Values.operator.volumeSyncInterval }}
+            - "--volume-sync-interval={{ . }}"
+            {{- end }}
+            {{- with .Values.operator.volumeStorageClass }}
+            # StorageClass for the PVCs the operator provisions behind session volumes; empty
+            # uses the cluster default (local-path on the bootstrap cluster).
+            - "--volume-storage-class={{ . }}"
+            {{- end }}
+            {{- with .Values.operator.sessionImagePullPolicy }}
+            # imagePullPolicy for session containers. IfNotPresent (the flag default) supports
+            # air-gapped sites and locally imported images; Always re-checks the registry so a
+            # re-pushed fixed-tag catalogue image is picked up.
+            - "--session-image-pull-policy={{ . }}"
             {{- end }}
           env:
             # Short-lived internal JWT (RS256, aud=gshare-internal) authenticating the callbacks. The

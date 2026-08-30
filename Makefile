@@ -124,15 +124,26 @@ smoke: ## Wait for the local API to report healthy
 	done; echo "api did not become healthy"; exit 1
 
 # ── Helm deployments ──
+# The chart manages the system namespace itself (PSA labels live on it), so `--create-namespace`
+# must NOT be used: helm would create the namespace without release ownership metadata and the
+# chart's own Namespace manifest would then fail the ownership check on first install. Instead,
+# pre-create the namespace carrying the Helm ownership metadata so the chart adopts it cleanly.
+.PHONY: ensure-namespace
+ensure-namespace:
+	@kubectl get ns $(SYS_NS) >/dev/null 2>&1 || kubectl create ns $(SYS_NS)
+	@kubectl label ns $(SYS_NS) app.kubernetes.io/managed-by=Helm --overwrite >/dev/null
+	@kubectl annotate ns $(SYS_NS) meta.helm.sh/release-name=$(HELM_RELEASE) \
+	  meta.helm.sh/release-namespace=$(SYS_NS) --overwrite >/dev/null
+
 .PHONY: prod-deploy
-prod-deploy: ## Deploy against externally managed Postgres/Redis and secrets
-	helm upgrade -i $(HELM_RELEASE) ./$(CHART) -n $(SYS_NS) --create-namespace \
+prod-deploy: ensure-namespace ## Deploy against externally managed Postgres/Redis and secrets
+	helm upgrade -i $(HELM_RELEASE) ./$(CHART) -n $(SYS_NS) \
 	  -f $(PROD_VALUES) $(DOMAIN_VALUES_ARG) --set images.api.tag=$(TAG) --set images.worker.tag=$(TAG) \
 	  --set images.operator.tag=$(TAG) --set images.frontend.tag=$(TAG)
 
 .PHONY: deploy-incluster
-deploy-incluster: ## All-in-one deploy (chart provisions data tier, secrets, CRDs, namespaces)
-	helm upgrade -i $(HELM_RELEASE) ./$(CHART) -n $(SYS_NS) --create-namespace \
+deploy-incluster: ensure-namespace ## All-in-one deploy (chart provisions data tier, secrets, CRDs, namespaces)
+	helm upgrade -i $(HELM_RELEASE) ./$(CHART) -n $(SYS_NS) \
 	  -f deploy/values/incluster.yaml $(DOMAIN_VALUES_ARG) \
 	  --set images.api.tag=$(TAG) --set images.worker.tag=$(TAG) \
 	  --set images.operator.tag=$(TAG) --set images.frontend.tag=$(TAG)
@@ -143,7 +154,8 @@ deploy-dataplane: ## Deploy the data plane only (operator, CRDs, namespaces, RBA
 	@test -n "$(CONTROL_PLANE_URL)" || { echo "CONTROL_PLANE_URL is required and must be reachable from cluster pods"; exit 1; }
 	# 1. Install the chart first so the operator is running and can pick the secret up;
 	#    it mounts the internal-JWT secret optionally.
-	helm upgrade -i $(HELM_RELEASE) ./$(CHART) -n $(SYS_NS) --create-namespace \
+	$(MAKE) ensure-namespace
+	helm upgrade -i $(HELM_RELEASE) ./$(CHART) -n $(SYS_NS) \
 	  -f deploy/values/dataplane.yaml $(DOMAIN_VALUES_ARG) \
 	  --set images.operator.tag=$(TAG) \
 	  --set operator.clusterId=$(CLUSTER_ID) \
@@ -175,9 +187,10 @@ prod-undeploy: ## Uninstall the Helm release
 	-helm uninstall $(HELM_RELEASE) -n $(SYS_NS)
 
 .PHONY: deploy-monitoring
-deploy-monitoring: ## Optional: deploy dcgm-exporter + Prometheus as the per-GPU utilisation source
-	kubectl apply -f deploy/monitoring/dcgm-prometheus.yaml
-	@echo "enable with: helm upgrade ... --set operator.prometheusUrl=http://prometheus.monitoring.svc:9090"
+deploy-monitoring: ## Optional: Prometheus + dcgm/node/kube-state exporters (usage panels, admin monitoring, idle reaper)
+	kubectl apply -f deploy/monitoring/monitoring-stack.yaml
+	@echo "point the reaper at it: helm upgrade ... --set operator.prometheusUrl=http://prometheus.monitoring.svc:9090"
+	@echo "(deploy/monitoring/dcgm-prometheus.yaml is the minimal dcgm-only variant)"
 
 .PHONY: hami-fork-image
 hami-fork-image: ## Optional: build and push the GShare-patched HAMi scheduler extender

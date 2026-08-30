@@ -69,7 +69,7 @@ export function ConfirmProvider({ children }: { children: ReactNode }) {
       {children}
       {o && (
         <div
-          className="fixed inset-0 z-50 grid place-items-center bg-black/40 p-4"
+          className="fixed inset-0 z-50 grid place-items-center bg-black/50 p-4 backdrop-blur-[2px]"
           onMouseDown={(e) => { if (e.target === e.currentTarget) close(false); }}
         >
           <div
@@ -78,18 +78,18 @@ export function ConfirmProvider({ children }: { children: ReactNode }) {
             aria-modal="true"
             aria-labelledby="gs-confirm-title"
             aria-describedby={o.body ? 'gs-confirm-body' : undefined}
-            className="gs-card w-full max-w-[440px] shadow-card"
+            className="gs-card w-full max-w-[440px] shadow-raised"
           >
-            <h2 id="gs-confirm-title" className="text-[15px] font-extrabold">{o.title}</h2>
-            {o.body && <div id="gs-confirm-body" className="text-[13px] text-muted mt-2">{o.body}</div>}
+            <h2 id="gs-confirm-title" className="gs-h2">{o.title}</h2>
+            {o.body && <div id="gs-confirm-body" className="text-sm text-muted mt-2">{o.body}</div>}
             {o.consequences && o.consequences.length > 0 && (
-              <ul className="mt-3 space-y-1 text-[12.5px] text-muted list-disc pl-5">
+              <ul className="mt-3 space-y-1 text-xs text-muted list-disc pl-5">
                 {o.consequences.map((c) => <li key={c}>{c}</li>)}
               </ul>
             )}
             {needsTyping && (
               <label className="block mt-3">
-                <span className="text-[12px] font-semibold text-muted">
+                <span className="text-xs font-semibold text-muted">
                   {t('confirm.typeToConfirm', { text: o.confirmText })}
                 </span>
                 <input

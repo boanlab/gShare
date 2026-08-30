@@ -7,6 +7,8 @@ package podbuilder
 import (
 	"testing"
 
+	"k8s.io/apimachinery/pkg/api/resource"
+
 	gsharev1 "github.com/gshare/operator/api/v1"
 )
 
@@ -119,5 +121,93 @@ func TestCPUSessionRequestsNoGPU(t *testing.T) {
 	}
 	if pod.Spec.RuntimeClassName != nil {
 		t.Fatalf("cpu session must not set runtimeClassName")
+	}
+}
+
+// Per-card mode: fractional drops the node-pool selector and pins the ledger-reserved card;
+// exclusive flows through hami-scheduler as a 100% slice.
+func TestPerCardModeFractionalPinsCard(t *testing.T) {
+	b := &Builder{Namespace: "gshare-sessions", PerCardMode: true}
+	s := &gsharev1.GShareSession{Spec: gsharev1.GShareSessionSpec{
+		ResourceClass: "gpu", Mode: "fractional", Image: "img",
+	}}
+	s.Spec.GpuMemMb = 12288
+	s.Spec.GpuCores = 13
+	s.Spec.PinnedGpuUuid = "GPU-pinned"
+	pod := b.BuildPod(s)
+	if pod.Spec.NodeSelector["gshare.io/gpu-mode"] != "" {
+		t.Fatalf("per-card mode must not use the node-pool selector")
+	}
+	if pod.Spec.SchedulerName != "hami-scheduler" {
+		t.Fatalf("fractional must keep hami-scheduler")
+	}
+	if got := pod.Annotations["nvidia.com/use-gpuuuid"]; got != "GPU-pinned" {
+		t.Fatalf("expected the ledger pin annotation, got %q", got)
+	}
+}
+
+func TestPerCardModeExclusiveIsFullCardSlice(t *testing.T) {
+	b := &Builder{Namespace: "gshare-sessions", PerCardMode: true}
+	s := &gsharev1.GShareSession{Spec: gsharev1.GShareSessionSpec{
+		ResourceClass: "gpu", Mode: "exclusive", Image: "img",
+	}}
+	s.Spec.PinnedGpuUuid = "GPU-pinned"
+	pod := b.BuildPod(s)
+	if pod.Spec.SchedulerName != "hami-scheduler" {
+		t.Fatalf("per-card exclusive must flow through hami-scheduler")
+	}
+	limits := pod.Spec.Containers[0].Resources.Limits
+	if limits["nvidia.com/gpumem-percentage"] != resource.MustParse("100") {
+		t.Fatalf("exclusive must be a 100%% slice, got %v", limits)
+	}
+	if got := pod.Annotations["nvidia.com/use-gpuuuid"]; got != "GPU-pinned" {
+		t.Fatalf("expected the ledger pin annotation, got %q", got)
+	}
+	if pod.Spec.NodeSelector["gshare.io/gpu-mode"] != "" {
+		t.Fatalf("per-card mode must not use the node-pool selector")
+	}
+}
+
+func TestLegacyExclusiveUnchangedWithoutFlag(t *testing.T) {
+	b := &Builder{Namespace: "gshare-sessions"}
+	pod := b.BuildPod(&gsharev1.GShareSession{Spec: gsharev1.GShareSessionSpec{
+		ResourceClass: "gpu", Mode: "exclusive", Image: "img",
+	}})
+	if pod.Spec.SchedulerName != "" {
+		t.Fatalf("legacy exclusive must bypass hami-scheduler")
+	}
+	if pod.Spec.NodeSelector["gshare.io/gpu-mode"] != "exclusive" {
+		t.Fatalf("legacy exclusive keeps the node-pool selector")
+	}
+}
+
+// Volume mounting: the control-plane volume id (vol_ULID, uppercase + underscore) must be
+// sanitized into an RFC 1123 name for the pod volume and PVC reference — the raw id used to
+// fail pod creation outright. readOnly is the per-session mount intent, independent of the PVC
+// access mode.
+func TestVolumeNamesAreSanitizedAndReadOnlyHonoured(t *testing.T) {
+	s := &gsharev1.GShareSession{Spec: gsharev1.GShareSessionSpec{
+		ResourceClass: "gpu", Mode: "fractional", Image: "img",
+		Volumes: []gsharev1.VolumeSpec{
+			{Name: "vol_01ABC_XYZ", MountPath: "/data", Mode: "ReadWriteOnce"},
+			{Name: "vol_01DEF", MountPath: "/shared", Mode: "ReadWriteMany", ReadOnly: true},
+		},
+	}}
+	pod := (&Builder{}).BuildPod(s)
+	if got := pod.Spec.Volumes[0].Name; got != "vol-01abc-xyz" {
+		t.Fatalf("volume name not sanitized: %q", got)
+	}
+	if got := pod.Spec.Volumes[0].PersistentVolumeClaim.ClaimName; got != "vol-01abc-xyz" {
+		t.Fatalf("claim name not sanitized: %q", got)
+	}
+	mounts := pod.Spec.Containers[0].VolumeMounts
+	if mounts[0].ReadOnly {
+		t.Fatalf("rw mount must not be read-only")
+	}
+	if !mounts[1].ReadOnly {
+		t.Fatalf("readOnly mount intent must be honoured on a writable volume")
+	}
+	if pod.Spec.Volumes[1].PersistentVolumeClaim.ReadOnly != true {
+		t.Fatalf("pvc source of a ro mount should be read-only")
 	}
 }

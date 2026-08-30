@@ -22,6 +22,7 @@ class AuditLogEntry(BaseModel):
     entry_hash: str | None = None
     at: str | None = None
     actor_name: str | None = None
+    actor_email: str | None = None   # resolved for the detail view (5-6); operator actors have none
     target_name: str | None = None   # the target id resolved to a human-readable name: whose wallet, session, or volume
 
 

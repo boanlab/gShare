@@ -176,3 +176,65 @@ async def test_consume_idempotent(db):
         )
     ).all()
     assert len(consume_rows) == 1
+
+
+@pytest.mark.asyncio
+async def test_consume_exhaustion_clamps_to_zero_and_arms_grace(db):
+    """owed > balance: charge exactly down to 0 (no wallet_sigma violation) and arm grace.
+
+    Regression: the unclamped charge violated the balance>=0 CheckConstraint, so the whole
+    consume aborted every minute — nothing billed, no exhaustion, session running for free.
+    """
+    from app.core.redis import get_redis
+
+    wallet = await _make_wallet(db, balance="10", reserved="5")
+    started = datetime.now(UTC) - timedelta(hours=1)
+    sess = Session(
+        id=ids.new("session"), owner_user_id=ids.new("user"), cluster_id=ids.new("cluster"),
+        offering_id=ids.new("offering"), image_id=ids.new("image"), resource_class="gpu",
+        mode="fractional", gpu_mem_mb=10000, gpu_cores=100, device_total_mem_mb=20000,
+        billing_wallet_id=wallet.id, status="running",
+        credit_per_hour_snapshot=Decimal("5000"), started_at=started,
+    )
+    async with db.begin():
+        db.add(sess)
+
+    await CreditEngine(db).consume(sess, minute_bucket=99, now=started + timedelta(hours=1))
+
+    after = await _reload(db, wallet.id)
+    assert after.balance == Decimal("0.00")
+    assert after.reserved == Decimal("0.00")
+    # Exhaustion armed the grace marker for the enforcer (warn -> graceful pause).
+    assert await get_redis().get(f"grace:{sess.id}") is not None
+
+
+@pytest.mark.asyncio
+async def test_resume_requires_solvent_wallet(db):
+    """Resuming a billable session with an empty wallet must fail with 402, not run free.
+
+    Regression: start() only re-reserved GPU capacity — the creation-time hold key was already
+    spent, so a credit-exhausted session could be resumed by hand and ran until the next grace
+    window paused it again (a free-GPU loop).
+    """
+    from app.core.errors import InsufficientCredit
+    from app.domain.session_service import SessionService
+
+    wallet = await _make_wallet(db, balance="0")
+    sess = Session(
+        id=ids.new("session"), owner_user_id=ids.new("user"), cluster_id=ids.new("cluster"),
+        offering_id=ids.new("offering"), image_id=ids.new("image"), resource_class="gpu",
+        mode="fractional", gpu_mem_mb=10000, gpu_cores=100, device_total_mem_mb=20000,
+        billing_wallet_id=wallet.id, status="paused",
+        credit_per_hour_snapshot=Decimal("200"), started_at=datetime.now(UTC),
+    )
+    async with db.begin():
+        db.add(sess)
+
+    with pytest.raises(InsufficientCredit):
+        await SessionService(db).start(sess.id)
+
+    # The refused resume leaves the session paused and the wallet untouched.
+    row = (await db.execute(select(Session.status).where(Session.id == sess.id))).scalar_one()
+    assert row == "paused"
+    after = await _reload(db, wallet.id)
+    assert after.balance == Decimal("0.00")

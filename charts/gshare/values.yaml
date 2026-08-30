@@ -12,9 +12,12 @@ global:
     system: gshare-system
     sessions: gshare-sessions
     infra: gshare-infra
-  # Domains — single console/session host. (internal JWKS URL is set separately via internalJwksUrl)
+  # Domains — single console/session host.
   domains:
     console: gshare.example.com        # user console + sessions (path-based /proxy/{cr}); replace with the real domain in prod
+  # Scheme for the connect URLs the API hands out. Keep https behind a TLS-terminating proxy;
+  # set http when the deployment is fronted by plain HTTP (labs, air-gapped sites).
+  sessionUrlScheme: https
 
 # ── Namespace creation toggle (chart creates them vs. created externally) ──
 createNamespaces: true
@@ -28,6 +31,10 @@ createNamespaces: true
 #   operator.controlPlaneUrl. See deploy/values/dataplane.yaml and `make deploy-dataplane`.
 controlPlane:
   enabled: true
+  # Pin every control-plane pod (api, worker, frontend, data tier, backup jobs) to matching
+  # nodes — e.g. {node-role.kubernetes.io/control-plane: ""} — so GPU and CPU worker nodes
+  # carry sessions only. Empty = no pinning (default scheduler spread).
+  nodeSelector: {}
 
 # ── Images ── (repository is joined with global.imageRegistry; see _helpers.tpl)
 images:
@@ -53,6 +60,17 @@ images:
 api:
   replicas: 2                          # at least 2 replicas
   port: 8080                           # one uvicorn serves public (/api/v1) + internal (/internal, /.well-known)
+  # Per-process SQLAlchemy pool (shared by api and worker via the ConfigMap). SSE streams hold no
+  # pooled connection, so this covers request-scoped work only.
+  dbPoolSize: 20
+  # Registry prefix for console-built images (GSHARE_BUILD_REGISTRY).
+  buildRegistry: "registry.gshare.internal/gshare-user"
+  # Audit-log retention in days (0 disables pruning).
+  auditRetentionDays: 180
+  # Days-to-hours window a deleted volume's data is kept before the operator reclaims the PVC
+  # (and the CSI driver the dataset). 0 reclaims on the next sync (about five minutes).
+  volumeReclaimGraceHours: 24
+  dbMaxOverflow: 10
   resources:
     requests: { cpu: "250m", memory: 512Mi }
     limits: { cpu: "1", memory: 1Gi }
@@ -73,6 +91,9 @@ worker:
 
 # ── gshare-operator (Go, per-cluster, leader-elected) ──
 operator:
+  # Pin the operator pod; on a data-plane-only cluster this is the one control-plane
+  # pod and may need pinning independent of controlPlane.nodeSelector.
+  nodeSelector: {}
   replicas: 1                          # leader-elected
   # --cluster-id. The cluster FK target for inventory/sessions, so it must match the backend-seeded
   # LOCAL_CLUSTER_ID. '_' is allowed (the operator DNS-sanitizes the leader-lease name gshare-operator.<id>).
@@ -81,22 +102,21 @@ operator:
   # secrets.generate=true the chart Hook Job/CronJob create+rotate it; in prod external-secrets injects the same name/key.
   internalJwtSecret: gshare-operator-internal-jwt
   internalJwtTokenTtlSec: 604800       # issued-token TTL (7d); the CronJob re-signs daily, well within this.
-  # The operator is a token holder (no private key; verifies via JWKS). Routing/callbacks/namespaces
-  # are derived by the chart from global.* (operator-deployment.yaml).
-  internalJwksUrl: "https://api.gshare.internal/.well-known/gshare-internal-jwks.json"
+  # The operator is a token holder only; routing/callbacks/namespaces are derived by the chart
+  # from global.* (operator-deployment.yaml).
   # Base URL of an external control plane, for example http://10.0.0.10:8080. Left empty (the
   # all-in-one case) the status callbacks and connect-verify point at the in-cluster api service.
   # When set, both the operator callback (--sot-endpoint) and the session ingress forward-auth
   # (--connect-verify-url) point here. Required when controlPlane.enabled is false.
   # It must be reachable from both the operator pod and ingress-nginx.
   controlPlaneUrl: ""
-  # Where the idle reaper gets per-GPU utilisation. Pick one; with neither set, idle GPU reclamation
-  # is disabled and only the max-runtime cap applies.
-  # 1. hamiMonitorUrl (recommended): HAMi's vGPU monitor, which stock HAMi already runs, so no extra
-  #    infrastructure is needed. It takes precedence over Prometheus.
-  #    For example http://hami-device-plugin-monitor.kube-system.svc:31992, which
-  #    deploy/values/incluster.yaml sets by default.
-  hamiMonitorUrl: ""
+  # Where the idle reaper gets per-GPU utilisation. With neither set, idle GPU reclamation is
+  # disabled and only the max-runtime cap applies — on a shared fleet that is the single most
+  # expensive switch to leave off, so the HAMi monitor is the DEFAULT. Set hamiMonitorUrl to ""
+  # explicitly to disable reclamation.
+  # 1. hamiMonitorUrl (recommended): HAMi's vGPU monitor, which stock HAMi already runs, so no
+  #    extra infrastructure is needed. It takes precedence over Prometheus.
+  hamiMonitorUrl: "http://hami-device-plugin-monitor.kube-system.svc:31992"
   # 2. prometheusUrl: DCGM_FI_DEV_GPU_UTIL from Prometheus, when you already run a monitoring stack.
   #    Deploy deploy/monitoring/dcgm-prometheus.yaml, then set
   #    "http://prometheus.monitoring.svc:9090".
@@ -114,12 +134,39 @@ operator:
   # bypass, which can only borrow exclusively.
   # Fractional borrowing also needs the backend's GSHARE_YIELD_FRACTIONAL_BORROW enabled.
   hamiYieldExtender: false
+  # Per-card GPU pools (flag-gated rollout): pool membership becomes a per-CARD ledger fact —
+  # every GPU session flows through hami-scheduler pinned to the reserved card, exclusive is a
+  # 100% HAMi slice, and gshare.io/gpu-mode node labels stop mattering for placement. Off keeps
+  # the legacy node-pool behaviour exactly.
+  perCardMode: false
+  # StorageClass for session-volume PVCs (the operator ensures one PVC per volume on first
+  # mount). Empty uses the cluster default StorageClass — local-path on the bootstrap cluster,
+  # which serves RWO only and enforces no quota (df shows the node disk). With a storage node set
+  # up by cluster-bootstrap.sh (ZFS + NFS behind democratic-csi) use its class, gshare-data: every
+  # access mode, and a df-visible, ENOSPC-enforced quota per volume.
+  volumeStorageClass: ""
+  # How often the operator reports session-volume PVCs to the control plane — usage for the
+  # ledger, approved quota growth applied to the claim, deleted volumes reclaimed after their
+  # grace window. Go duration; "0" disables.
+  volumeSyncInterval: 5m
+  # imagePullPolicy for session containers. IfNotPresent (the default) lets locally imported and
+  # air-gapped images run; set Always to re-check the registry on every session start so that a
+  # re-pushed fixed-tag catalogue image is picked up.
+  sessionImagePullPolicy: IfNotPresent
   # Full image reference for the lossless-pause and in-place-yield node agent. Left empty, the
   # checkpointer is disabled: pause falls back to cold, and neither in-place yield nor graceful
   # demotion is available. It requires the criu and cuda-checkpoint node labels, the gshare-infra
   # namespace, and the gshare-lossless-agent service account.
   # (See docs/paper/manuscript, §Implementation.)
   losslessAgentImage: ""
+  # Full image reference for the MIG-mode node agent (build/images/mig-agent). Empty disables
+  # card-level hami-core<->mig transitions; the pool screens still show desired modes as Pending.
+  migAgentImage: ""
+  # kaniko executor image for console image builds (GShareImageBuild). Empty fails builds fast
+  # with a clear message instead of leaving them queued.
+  kanikoImage: ""
+  # Pass --insecure/--skip-tls-verify to kaniko — needed for plain-HTTP local registries.
+  buildInsecureRegistry: false
   resources:
     requests: { cpu: "100m", memory: 128Mi }
     limits: { cpu: "500m", memory: 256Mi }
@@ -150,6 +197,13 @@ postgres:
   inCluster: false                      # true → chart deploys postgres Deployment+PVC+Service
   image: postgres:16
   storage: 5Gi
+  # Nightly pg_dump into its own PVC — the minimum safety net for the single-replica
+  # in-cluster data tier. Only renders when inCluster.
+  backup:
+    enabled: true
+    schedule: "0 3 * * *"
+    storage: 10Gi
+    keep: 14
   host: gshare-pg-rw.gshare-system.svc  # matches this service name when inCluster
   port: 5432
   database: gshare

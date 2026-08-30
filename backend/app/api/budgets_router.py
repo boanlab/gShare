@@ -10,7 +10,8 @@ from decimal import Decimal
 
 from fastapi import APIRouter, Depends, Query, status
 from pydantic import BaseModel, Field
-from sqlalchemy import false, or_, select
+from sqlalchemy import delete as sa_delete
+from sqlalchemy import false, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import Pagination, get_current_principal
@@ -19,7 +20,7 @@ from app.auth.rbac import Principal, rbac_allows
 from app.core import ids
 from app.core.errors import DomainError, Forbidden, NotFound
 from app.db.base import get_db
-from app.db.models import Budget, BudgetAlert, CreditTransaction
+from app.db.models import Budget, BudgetAlert, CreditTransaction, Project, Session
 from app.domain.audit_service import AuditService
 
 router = APIRouter(prefix="/budgets", tags=["budgets"])
@@ -202,6 +203,9 @@ async def delete_budget(
     if budget is None:
         raise NotFound("budget not found")
     _assert_can_manage_budget(principal, budget.scope, budget.scope_id)
+    # Budgets are created with their 80/100% alert rows; deleting the parent without them was an
+    # FK violation, which made EVERY budget undeletable from the moment it was created.
+    await db.execute(sa_delete(BudgetAlert).where(BudgetAlert.budget_id == budget_id))
     await db.delete(budget)
     await AuditService(db).record(
         actor=principal.user_id, action="budget.delete", target=budget_id,
@@ -233,19 +237,31 @@ async def forecast(
     now = datetime.now(UTC)
     since = now - timedelta(days=days)
 
-    # Burn rate from consume txns in this period since the lookback window.
-    # Match by ref scope marker is unavailable on txn; use spent_credit as a robust fallback
-    # and refine with recent consume volume if scoped txns are linkable.
-    consume_rows = (
-        await db.scalars(
-            select(CreditTransaction).where(
-                CreditTransaction.type == "consume",
-                CreditTransaction.created_at >= since,
-                CreditTransaction.created_at >= budget.period_start,
-            )
+    # Burn rate from the scope's consume txns in the lookback window. consume amounts are stored
+    # NEGATIVE and attribution is by session (txn.ref == session id, session.group_id in scope) —
+    # the same rule budget_rollup uses; an unscoped sum would count every org's spend.
+    if budget.scope == "group":
+        scope_groups = [budget.scope_id]
+    else:
+        scope_groups = list(
+            (await db.scalars(select(Project.id).where(Project.org_id == budget.scope_id))).all()
         )
-    ).all()
-    recent_consumed = sum((t.amount for t in consume_rows), Decimal(0))
+    recent_consumed = Decimal(0)
+    if scope_groups:
+        signed = (
+            await db.scalar(
+                select(func.coalesce(func.sum(CreditTransaction.amount), 0))
+                .select_from(CreditTransaction)
+                .join(Session, Session.id == CreditTransaction.ref)
+                .where(
+                    Session.group_id.in_(scope_groups),
+                    CreditTransaction.type == "consume",
+                    CreditTransaction.created_at >= since,
+                    CreditTransaction.created_at >= budget.period_start,
+                )
+            )
+        ) or Decimal(0)
+        recent_consumed = -Decimal(signed)
 
     if recent_consumed > 0:
         burn_per_day = float(recent_consumed) / float(days)

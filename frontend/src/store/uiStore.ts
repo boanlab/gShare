@@ -23,7 +23,7 @@ interface UiState {
 export const useUiStore = create<UiState>()(
   persist(
     (set, get) => ({
-      theme: 'light',
+      theme: 'dark',
       toasts: [],
       toggleTheme() {
         const next: Theme = get().theme === 'dark' ? 'light' : 'dark';

@@ -12,6 +12,7 @@ class MeMembership(BaseModel):
     org_id: str | None = None
     org_name: str | None = None
     role: str
+    has_group_admin: bool = True               # someone (group_admin/org_admin) can approve requests here
 
 
 class MeResponse(BaseModel):

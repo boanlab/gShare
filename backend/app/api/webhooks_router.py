@@ -19,17 +19,13 @@ from app.domain.audit_service import AuditService
 router = APIRouter(prefix="/webhooks", tags=["webhooks"])
 
 # Valid outbound event types.
+# Only events that actually have an emitter may be subscribed to — advertising an event that
+# nothing fires is a silent lie to the subscriber. Add a name here TOGETHER with its
+# emit_webhook_safe call site.
 _VALID_EVENTS = {
-    "session.status_changed",
-    "session.queued",
-    "session.assigned",
-    "wallet.low_balance",
-    "wallet.topped_up",
-    "node.status_changed",
-    "budget.threshold_reached",
-    "budget.exceeded",
-    "node_health.event",
-    "image_build.completed",
+    "session.status_changed",   # status_sync (pause/terminate transitions)
+    "wallet.low_balance",       # billing_worker daily low-balance warning
+    "node_health.event",        # internal inventory_router health callback
 }
 
 

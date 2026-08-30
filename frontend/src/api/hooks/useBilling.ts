@@ -34,6 +34,7 @@ export interface TopupRequestFilter {
   wallet_id?: string;
   page?: number;
   size?: number;
+  scope?: 'mine' | 'all';
 }
 
 // GET /credits/topup-requests — the top-up request inbox that drives the approval workflow.
@@ -52,6 +53,19 @@ export interface TopupBody {
   amount: string;
   reason?: string;
   ref?: string;
+}
+
+// POST /credits/topup-requests — raise a top-up request. With a group wallet_id this is the group
+// administrator asking the system tier for funding (the replacement for the old escalation).
+export function useCreateTopupRequest() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: async (body: { wallet_id: string; amount: string; note?: string }) => {
+      const { data } = await api.POST('/api/v1/credits/topup-requests', { body } as never);
+      return data;
+    },
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['credits'] }),
+  });
 }
 
 // POST /credits/wallets/{id}/topup — credit a wallet. Idempotency key required; always positive.

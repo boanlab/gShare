@@ -1,4 +1,5 @@
 import { useState } from 'react';
+import { Select } from '@/components/Select';
 import { useTranslation } from 'react-i18next';
 import { DisabledReason } from '@/components/Field';
 import { useWallets, useBillingReport, type BillingReportQuery } from '@/api/hooks/useBilling';
@@ -45,56 +46,57 @@ export function SettlementReport() {
 
   const rowColumns: Column<ReportRow>[] = [
     { key: 'group', header: t('common.group'), render: (r) => <b>{r.group_name ?? r.group}</b> },
-    { key: 'consumed', header: t('admin.settlement.colConsumed'), render: (r) => r.consumed ?? '—' },
-    { key: 'topup', header: t('admin.settlement.colTopup'), render: (r) => r.topup ?? '—' },
-    { key: 'gpu_hours', header: t('admin.settlement.colGpuHours'), render: (r) => r.gpu_hours ?? '—' },
+    { key: 'consumed', header: t('admin.settlement.colConsumed'), render: (r) => r.consumed ?? '-' },
+    { key: 'topup', header: t('admin.settlement.colTopup'), render: (r) => r.topup ?? '-' },
+    { key: 'gpu_hours', header: t('admin.settlement.colGpuHours'), render: (r) => r.gpu_hours ?? '-' },
   ];
 
   return (
     <section className="mt-8">
-      <h2 className="text-lg font-extrabold mb-1">{t('admin.settlement.title')}</h2>
-      <p className="text-muted text-[13px] mb-4">{t('admin.settlement.subtitle')}</p>
+      <h2 className="text-lg font-bold mb-1">{t('admin.settlement.title')}</h2>
+      <p className="text-muted text-sm mb-4">{t('admin.settlement.subtitle')}</p>
 
       <form
         data-url-state
         className="gs-card mb-4 flex gap-3 flex-wrap items-end"
         onSubmit={(e) => { e.preventDefault(); if (from && to) run(); }}
       >
-        <label className="text-[13px] font-semibold">
+        <label className="text-sm font-semibold">
           {t('admin.settlement.scope')}
-          <select className="gs-input mt-1 w-auto block" value={scope} onChange={(e) => { setScope(e.target.value as typeof scope); setScopeId(''); }}>
+          <Select className="gs-input mt-1 w-auto block" value={scope} onChange={(e) => { setScope(e.target.value as typeof scope); setScopeId(''); }}>
             <option value="org">{t('enum.scope.org')}</option>
             <option value="group">{t('enum.scope.group')}</option>
             <option value="wallet">{t('enum.scope.wallet')}</option>
-          </select>
+          </Select>
         </label>
-        <label className="text-[13px] font-semibold">
+        <label className="text-sm font-semibold">
           {t('admin.settlement.target')}
-          <select className="gs-input mt-1 w-56 block" value={scopeId} onChange={(e) => setScopeId(e.target.value)}>
+          <Select className="gs-input mt-1 w-56 block" value={scopeId} onChange={(e) => setScopeId(e.target.value)}>
             <option value="">{t('admin.settlement.everything')}</option>
             {scopeTargets.map((t) => <option key={t.id} value={t.id}>{t.label}</option>)}
-          </select>
+          </Select>
         </label>
-        <label className="text-[13px] font-semibold">
-          from
+        <label className="text-sm font-semibold">
+          {t('common.fromDate')}
           <input type="datetime-local" className="gs-input mt-1 block" value={from} onChange={(e) => setFrom(e.target.value)} autoComplete="off" />
         </label>
-        <label className="text-[13px] font-semibold">
-          to
+        <label className="text-sm font-semibold">
+          {t('common.toDate')}
           <input type="datetime-local" className="gs-input mt-1 block" value={to} onChange={(e) => setTo(e.target.value)} autoComplete="off" />
         </label>
-        <label className="text-[13px] font-semibold">
-          group by
-          <select className="gs-input mt-1 w-auto block" value={groupBy} onChange={(e) => setGroupBy(e.target.value as typeof groupBy)}>
+        <label className="text-sm font-semibold">
+          {t('common.groupBy')}
+          <Select className="gs-input mt-1 w-auto block" value={groupBy} onChange={(e) => setGroupBy(e.target.value as typeof groupBy)}>
             <option value="group">{t('enum.scope.group')}</option>
-            <option value="offering">offering</option>
-            <option value="wallet">wallet</option>
-          </select>
+            <option value="offering">{t('admin.settlement.byOffering')}</option>
+            <option value="wallet">{t('admin.settlement.byWallet')}</option>
+          </Select>
         </label>
-        <DisabledReason reasons={from && to ? [] : [t('admin.settlement.rangeNeeded')]} />
         <button type="submit" className="gs-btn gs-btn-primary disabled:opacity-50" disabled={!from || !to}>
           {t('admin.settlement.run')}
         </button>
+        <span className="basis-full h-0" aria-hidden="true" />
+        <DisabledReason reasons={from && to ? [] : [t('admin.settlement.rangeNeeded')]} />
       </form>
 
       <div className="gs-card">
@@ -107,11 +109,11 @@ export function SettlementReport() {
         ) : (
           <>
             {report?.totals && (
-              <div className="flex flex-wrap gap-4 mb-4 text-[13px]">
+              <div className="flex flex-wrap gap-4 mb-4 text-sm">
                 {Object.entries(report.totals).map(([k, v]) => (
-                  <div key={k} className="gs-pill bg-surface-2 text-text">
-                    <span className="text-muted mr-1">{k}</span>
-                    <b>{v}</b>
+                  <div key={k} className="flex items-baseline gap-1.5">
+                    <span className="text-muted text-xs">{k}</span>
+                    <b className="gs-num text-sm">{v}</b>
                   </div>
                 ))}
                 {report.currency && <span className="text-muted">{t('admin.settlement.unit', { currency: report.currency })}</span>}

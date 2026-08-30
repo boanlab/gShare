@@ -46,6 +46,7 @@ export function formatDateTime(iso?: string | null): string {
 /** VRAM in MB, rendered in whichever unit reads better. */
 export function formatVram(mb?: number | null): string {
   if (mb == null) return '-';
+  if (mb === 0) return '0 GiB';   // "0 MiB / 119.6 GiB" mixed units read as an error
   return mb >= 1024 ? `${(mb / 1024).toFixed(mb % 1024 === 0 ? 0 : 1)} GiB` : `${mb} MiB`;
 }
 
@@ -86,4 +87,27 @@ export function countdown(expiresAt?: string | null): string {
   const m = Math.floor(left / 60);
   const s = left % 60;
   return `${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
+}
+
+/** Combined burn rate of the caller's running sessions, in credits per hour. */
+export function sessionBurnPerHour(
+  sessions?:
+    | { status: string; credit_per_hour_snapshot?: number | null; occupancy?: number | null }[]
+    | null,
+): number {
+  return (sessions ?? []).reduce(
+    (sum, s) =>
+      sum + (s.status === 'running' ? (s.credit_per_hour_snapshot ?? 0) * (s.occupancy ?? 1) : 0),
+    0,
+  );
+}
+
+/** Hours of runway, humanized: "79,805시간" reads as noise past a day or two. */
+export function runwayLabel(h: number): string {
+  if (h < 48) return i18n.t('wallet.durHours', { n: Math.round(h) });
+  const days = h / 24;
+  if (days < 60) return i18n.t('wallet.durDays', { n: Math.round(days) });
+  const months = days / 30.44;
+  if (months < 24) return i18n.t('wallet.durMonths', { n: Math.round(months) });
+  return i18n.t('wallet.durYears', { n: Math.round(days / 365.25) });
 }

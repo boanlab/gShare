@@ -1,0 +1,62 @@
+{{- if and .Values.postgres.inCluster .Values.postgres.backup.enabled }}
+# Nightly pg_dump of the in-cluster Postgres into its own PVC — the minimum viable safety net
+# for the single-replica data tier (production installs use external CloudNativePG and its own
+# backup story instead; this template only renders for postgres.inCluster).
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: gshare-pg-backup
+  namespace: {{ .Values.global.namespaces.system }}
+  labels:
+    {{- include "gshare.labels" . | nindent 4 }}
+spec:
+  accessModes: ["ReadWriteOnce"]
+  resources:
+    requests:
+      storage: {{ .Values.postgres.backup.storage }}
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: gshare-pg-backup
+  namespace: {{ .Values.global.namespaces.system }}
+  labels:
+    {{- include "gshare.labels" . | nindent 4 }}
+spec:
+  schedule: {{ .Values.postgres.backup.schedule | quote }}
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      template:
+        spec:
+          {{- include "gshare.controlPlaneNodeSelector" . | nindent 10 }}
+          restartPolicy: OnFailure
+          containers:
+            - name: pg-dump
+              image: {{ .Values.postgres.image }}
+              command:
+                - sh
+                - -c
+                - |
+                  set -e
+                  ts=$(date +%Y%m%d-%H%M%S)
+                  pg_dump -h gshare-pg-rw -U "$PGUSER" -d "$PGDATABASE" -Fc \
+                    -f "/backup/gshare-$ts.dump"
+                  # Keep the newest N dumps.
+                  ls -1t /backup/gshare-*.dump | tail -n +{{ add .Values.postgres.backup.keep 1 }} | xargs -r rm --
+                  echo "backup done: gshare-$ts.dump"
+              env:
+                - { name: PGUSER, value: {{ .Values.postgres.database | quote }} }
+                - { name: PGDATABASE, value: {{ .Values.postgres.database | quote }} }
+                - name: PGPASSWORD
+                  valueFrom:
+                    secretKeyRef: { name: gshare-pg-app, key: password }
+              volumeMounts:
+                - { name: backup, mountPath: /backup }
+          volumes:
+            - name: backup
+              persistentVolumeClaim:
+                claimName: gshare-pg-backup
+{{- end }}

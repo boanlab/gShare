@@ -545,6 +545,8 @@ async def connection_test(
             await notifier.system_admins(), "cluster_health",
             f"Cluster {new_status}",
             f"Cluster '{cluster.name}' changed from {prev_status} to {new_status}.",
+            params={"cluster_name": cluster.name, "prev_status": prev_status,
+                    "new_status": new_status},
             cluster_id=cluster_id, status=new_status,
         )
     await AuditService(db).record(

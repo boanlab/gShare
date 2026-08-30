@@ -1,6 +1,7 @@
 """Credit/wallet schemas."""
 from __future__ import annotations
 
+from datetime import datetime
 from decimal import Decimal
 
 from pydantic import BaseModel, Field, computed_field
@@ -54,6 +55,20 @@ class AllocateBody(BaseModel):
     reason: str | None = None
 
 
+class BulkAllocateBody(BaseModel):
+    # Allocate the same amount from the group's wallet to EVERY member's personal wallet in one
+    # idempotent operation — the start-of-term "give the whole class N credits" action.
+    group_id: str
+    amount: Decimal = Field(gt=0)
+    reason: str | None = None
+
+
+class BulkMonthlyGrantBody(BaseModel):
+    # Set the same monthly refill on every member wallet of a group. 0 disables it.
+    group_id: str
+    amount: Decimal = Field(ge=0)
+
+
 class AllocationRequestCreate(BaseModel):
     amount: Decimal = Field(gt=0)
     level: str = Field(default="user", pattern="^(user|group|org)$")
@@ -66,17 +81,26 @@ class AllocationRejectBody(BaseModel):
     reason: str
 
 
-class AllocationEscalateBody(BaseModel):
-    amount: Decimal | None = None     # when omitted, the escalated request uses the original amount
-    note: str | None = None
-
-
 class TransactionRead(ORMModel):
     id: str
     type: str                 # topup|hold|consume|refund|settle|adjust
     amount: Decimal
     balance_after: Decimal
     ref: str | None = None
+    # Human name for the ref: the session's name for session refs, a short label otherwise -
+    # so the ledger reads "which session spent this", not an opaque ULID.
+    ref_name: str | None = None
+    created_at: datetime | None = None
+    # Set when this row is a rollup of several transactions (per-minute consume for one session).
+    # entry_count == 1 means a single transaction and the period fields are absent.
+    entry_count: int = 1
+    period_start: datetime | None = None
+    period_end: datetime | None = None
+    # The session's billing is closed (its zero-amount settle marker folded into this row).
+    settled: bool = False
+    # The stream behind this rollup is still accruing: the session is running (consume) or the
+    # volume still exists (storage bills for provisioned capacity until deletion).
+    live: bool = False
 
 
 class TopupRejectBody(BaseModel):
@@ -92,9 +116,19 @@ class TopupRequestRead(BaseModel):
     status: str
     requester_id: str | None = None
     requester_name: str | None = None
+    note: str | None = None            # requester's justification
+    wallet_owner_type: str | None = None   # user|group — a member's own top-up vs group funding
+    wallet_owner_name: str | None = None
+    decided_reason: str | None = None  # approver's note / rejection reason
     decided_by: str | None = None
     created_at: str                 # ISO 8601 string
 
 
 class TopupRequestListResponse(BaseModel):
     data: list[TopupRequestRead]
+
+
+class SpendDayRead(BaseModel):
+    """One day of spend (consume + storage), for the wallet's usage chart."""
+    date: str      # YYYY-MM-DD in the caller's timezone (tz_offset_min)
+    amount: float  # credits drained that day, absolute

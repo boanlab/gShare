@@ -10,7 +10,6 @@ Domain exception -> HTTP/code mapping:
     QuotaExceeded -> 409 quota_exceeded
     NoCapacity -> 409 no_capacity
     InvalidStateTransition -> 409 invalid_state_transition
-    IdempotencyConflict -> 409 idempotency_key_conflict
     IdempotencyInProgress -> 409 idempotency_in_progress
     IdempotencyKeyRequired -> 400 idempotency_key_required
     Unauthenticated -> 401 unauthenticated
@@ -65,6 +64,16 @@ class NoCapacity(DomainError):
     code, http = "no_capacity", 409
 
 
+class RateLimited(DomainError):
+    code, http = "rate_limited", 429
+
+
+class Unserviceable(DomainError):
+    # The cluster has no ready device of the requested mode and model at all — queueing would
+    # wait forever, so the request is rejected outright rather than enqueued.
+    code, http = "unserviceable", 409
+
+
 class ImbalancedAllocation(DomainError):
     # When a fractional request's core and VRAM shares diverge too far — 1 GB with 100% of the
     # cores, say — it makes the physical GPU useless for compute to every other session on it.
@@ -85,13 +94,15 @@ class IncompatibleImage(DomainError):
     code, http = "incompatible_image", 422
 
 
+class NotImplementedFeature(DomainError):
+    # The endpoint exists in the contract but the behavior behind it is not built yet. Answering
+    # 501 honestly beats returning a fabricated success (a "restoring" that restores nothing).
+    code, http = "not_implemented", 501
+
+
 # ── Lifecycle / idempotency ──
 class InvalidStateTransition(DomainError):
     code, http = "invalid_state_transition", 409
-
-
-class IdempotencyConflict(DomainError):
-    code, http = "idempotency_key_conflict", 409
 
 
 class IdempotencyInProgress(DomainError):
@@ -117,6 +128,12 @@ class PasswordChangeRequired(DomainError):
     code, http = "password_change_required", 403
 
 
+class AlreadyExists(DomainError):
+    # A uniqueness collision (same name/type in the same scope). Distinct from quota_exceeded:
+    # nothing is full — the name is simply taken, and the console must say so.
+    code, http = "already_exists", 409
+
+
 class NotFound(DomainError):
     code, http = "not_found", 404
 
@@ -137,11 +154,18 @@ def register_exception_handlers(app: FastAPI) -> None:
 
     @app.exception_handler(RequestValidationError)
     async def _validation(req: Request, exc: RequestValidationError):  # noqa: ANN202
+        # Keep only the JSON-safe fields: a custom field_validator's ValueError rides along in
+        # ctx["error"] as the exception OBJECT, and serializing it raised — turning every custom
+        # validation failure into a 500 instead of this 422.
+        errors = [
+            {"loc": e.get("loc"), "msg": e.get("msg"), "type": e.get("type")}
+            for e in exc.errors()
+        ]
         return JSONResponse(
             status_code=422,
             content={"error": {
                 "code": "validation_failed", "message": "validation failed",
-                "details": {"errors": exc.errors()},
+                "details": {"errors": errors},
                 "request_id": getattr(req.state, "request_id", None),
                 "timestamp": _utcnow_iso(),
             }},

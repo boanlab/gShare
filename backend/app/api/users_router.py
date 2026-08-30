@@ -5,36 +5,45 @@ gated by AUTH_ALLOW_LOCAL_PASSWORD.
 """
 from __future__ import annotations
 
+import asyncio
+import json
 import math
+import secrets
 import time
+from decimal import Decimal
 from typing import Any
 
-from fastapi import APIRouter, Depends, Query, Response, status
+from fastapi import APIRouter, Depends, Query, Request, Response, status
 from jose import jwt
 from pydantic import BaseModel, Field
 from sqlalchemy import func, or_, select, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.deps import Pagination, get_current_principal
+from app.api.deps import Pagination, get_current_principal, idempotency_key, require_idem
 from app.api.schemas.user import MeResponse
 from app.auth.rbac import Principal, primary_global_role
 from app.core import ids
 from app.core.config import settings
 from app.core.errors import DomainError, Forbidden, NotFound, Unauthenticated
-from app.core.passwords import hash_password, verify_password
+from app.core.passwords import hash_password_async, verify_password_async
+from app.core.ratelimit import check_rate
+from app.core.redis import get_redis
 from app.db.base import get_db
 from app.db.models import (
+    Allocation,
     CreditWallet,
     Membership,
     Organization,
     Project,
+    StorageVolume,
     User,
 )
 from app.db.models import (
     Session as SessionModel,
 )
 from app.domain.audit_service import AuditService
+from app.domain.welcome_credit import grant_welcome_credit
 
 router = APIRouter(tags=["users"])
 
@@ -125,6 +134,20 @@ async def auth_me(
                 select(Organization.id, Organization.name).where(Organization.id.in_(oids))
             )).all()
             onames = {oid: onm for oid, onm in orows}
+    admin_gids: set[str] = set()
+    if pids:
+        # Which of the caller's groups have at least one live admin — the credit-request form
+        # disables the "ask my group admin" path when nobody could approve it.
+        arows = (await db.execute(
+            select(Membership.group_id.distinct())
+            .join(User, User.id == Membership.user_id)
+            .where(
+                Membership.group_id.in_(pids),
+                Membership.role.in_(("group_admin", "org_admin")),
+                User.deleted_at.is_(None),
+            )
+        )).all()
+        admin_gids = {gid for (gid,) in arows}
     memberships = [
         {
             "group_id": pid,
@@ -132,6 +155,7 @@ async def auth_me(
             "org_id": pinfo.get(pid, (None, None))[1],
             "org_name": onames.get(pinfo.get(pid, (None, None))[1]),
             "role": role,
+            "has_group_admin": pid in admin_gids,
         }
         for pid, role in principal.memberships.items()
     ]
@@ -154,7 +178,7 @@ class _LoginRequest(BaseModel):
 
 
 @router.post("/auth/login")
-async def auth_login(body: _LoginRequest, db: AsyncSession = Depends(get_db)):
+async def auth_login(body: _LoginRequest, request: Request, db: AsyncSession = Depends(get_db)):
     """Email+password local login (gated by AUTH_ALLOW_LOCAL_PASSWORD).
 
     Looks the user up by email and issues an HS256 token signed with USER_JWT_SECRET, which
@@ -163,6 +187,15 @@ async def auth_login(body: _LoginRequest, db: AsyncSession = Depends(get_db)):
     if not settings.AUTH_ALLOW_LOCAL_PASSWORD:
         raise Unauthenticated("local password login disabled")
     email = (body.email or "").strip().lower()
+    # Brute-force / thundering-herd guard. Per-email first (targeted stuffing), then per-client-IP
+    # (broad sweeps). The deployment sits behind ingress, so the first X-Forwarded-For hop is the
+    # client; fall back to the socket peer.
+    client_ip = (request.headers.get("x-forwarded-for") or "").split(",")[0].strip() or (
+        request.client.host if request.client else "unknown"
+    )
+    if email:
+        await check_rate(f"login:email:{email}", limit=10, window_sec=300)
+    await check_rate(f"login:ip:{client_ip}", limit=30, window_sec=300)
     user = None
     if email:
         user = (
@@ -170,10 +203,14 @@ async def auth_login(body: _LoginRequest, db: AsyncSession = Depends(get_db)):
         ).scalar_one_or_none()
     if user is None:
         raise Unauthenticated("invalid credentials")
+    # A suspended or soft-deleted account must not authenticate. Checked before the password so
+    # the account state, not the credential, decides — the message stays generic on purpose.
+    if user.deleted_at is not None or user.status == "suspended":
+        raise Unauthenticated("invalid credentials")
     # Password check: when a hash exists it must match. An account with no hash — bootstrap or
     # legacy — is let through, but must_change_password is set so a password is chosen immediately.
     if user.password_hash:
-        if not verify_password(body.password or "", user.password_hash):
+        if not await verify_password_async(body.password or "", user.password_hash):
             raise Unauthenticated("invalid credentials")
     elif not user.must_change_password:
         user.must_change_password = True
@@ -215,9 +252,9 @@ async def change_password(
     if user is None:
         raise NotFound("user", {"user_id": principal.user_id})
     if not user.must_change_password and user.password_hash:
-        if not verify_password(body.current_password or "", user.password_hash):
+        if not await verify_password_async(body.current_password or "", user.password_hash):
             raise Unauthenticated("current password mismatch")
-    user.password_hash = hash_password(body.new_password)
+    user.password_hash = await hash_password_async(body.new_password)
     user.must_change_password = False
     await AuditService(db).record(
         actor=user.id, action="user.change_password", target=user.id, result="ok"
@@ -232,6 +269,7 @@ async def list_users(
     status_filter: str | None = Query(default=None, alias="status"),
     q: str | None = Query(default=None),
     org_id: str | None = Query(default=None),
+    group_id: str | None = Query(default=None),
     principal: Principal = Depends(get_current_principal),
     db: AsyncSession = Depends(get_db),
 ):
@@ -262,6 +300,10 @@ async def list_users(
             Membership.org_id == org_id, Membership.role == "org_admin"
         )
         base = base.where(or_(User.id.in_(org_member_ids), User.id.in_(org_admin_ids)))
+    if group_id is not None:
+        base = base.where(
+            User.id.in_(select(Membership.user_id).where(Membership.group_id == group_id))
+        )
     if status_filter is not None:
         if status_filter not in _USER_STATUSES:
             raise _Validation("invalid status filter", {"status": status_filter})
@@ -380,7 +422,7 @@ async def create_user(
         status=body.status,
         global_role=None,
         global_roles=[],
-        password_hash=hash_password(body.password),   # initial password set at registration
+        password_hash=await hash_password_async(body.password),  # initial password set at registration
         must_change_password=True,                     # force a change at first login
     )
     db.add(user)
@@ -415,6 +457,10 @@ async def create_user(
         )
     )
 
+    # Group-configured welcome credit, minted into the fresh personal wallet (0 = off).
+    await db.flush()
+    welcome = await grant_welcome_credit(db, user.id, group)
+
     await AuditService(db).record(
         actor=principal.user_id,
         action="user.create",
@@ -424,11 +470,180 @@ async def create_user(
         group_id=body.group_id,
         org_id=group.org_id,
         initial_role=body.initial_role,
+        welcome_credit=(str(welcome) if welcome is not None else None),
     )
     await db.commit()
 
     response.headers["Location"] = f"/api/v1/users/{user.id}"
     return _serialize(user)
+
+
+class BulkUserRow(BaseModel):
+    email: str = Field(min_length=3, max_length=254)
+    name: str = Field(min_length=1, max_length=100)
+
+
+class BulkUserCreate(BaseModel):
+    group_id: str
+    initial_role: str = "member"
+    rows: list[BulkUserRow] = Field(min_length=1, max_length=200)
+
+
+_BULK_RESULT_TTL_SEC = 86400
+
+
+def _valid_email(email: str) -> bool:
+    at = email.find("@")
+    return at > 0 and "." in email[at + 1:] and not email.endswith(".")
+
+
+@router.post("/users/bulk", status_code=status.HTTP_207_MULTI_STATUS)
+async def bulk_create_users(
+    body: BulkUserCreate,
+    principal: Principal = Depends(get_current_principal),
+    db: AsyncSession = Depends(get_db),
+    idem: str | None = Depends(idempotency_key),
+):
+    """Roster import: create up to 200 users per request, each with a personal wallet, a
+    membership in the chosen group, and a server-generated initial password returned once in the
+    response (must_change_password forces rotation at first login).
+
+    Partial success by design: rows report ``created`` / ``exists`` / ``invalid`` individually so
+    re-uploading a roster is safe — existing accounts are reported, not fatal. The whole batch is
+    idempotent on the Idempotency-Key (a replay returns the stored result, passwords included,
+    for 24h). One audit record per batch, not one per student. super_admin·org_admin.
+    """
+    principal.require(action="user.create")
+    idem = require_idem(idem)
+    await check_rate(f"users-bulk:{principal.user_id}", limit=30, window_sec=300)
+
+    redis = get_redis()
+    cache_key = f"users-bulk:{principal.user_id}:{idem}"
+    cached = await redis.get(cache_key)
+    if cached:
+        return json.loads(cached)
+
+    if body.initial_role not in _MEMBERSHIP_ROLES:
+        raise _Validation("invalid initial_role", {"initial_role": body.initial_role})
+    group = await db.get(Project, body.group_id)
+    if group is None or group.deleted_at is not None:
+        raise NotFound("group", {"group_id": body.group_id})
+
+    # Validate + dedupe client-side rows first so hashing only runs for viable rows.
+    seen: set[str] = set()
+    prepared: list[tuple[int, str, str] | tuple[int, str, None]] = []  # (row, email, name|None=invalid)
+    for i, row in enumerate(body.rows):
+        email = row.email.strip().lower()
+        if not _valid_email(email):
+            prepared.append((i, row.email, None))
+        elif email in seen:
+            prepared.append((i, email, None))
+        else:
+            seen.add(email)
+            prepared.append((i, email, row.name.strip()))
+
+    existing = set(
+        (await db.scalars(select(User.email).where(User.email.in_(seen)))).all()
+    ) if seen else set()
+
+    # Hash the initial passwords off the loop with bounded concurrency.
+    to_create = [(i, email, name) for i, email, name in prepared
+                 if name is not None and email not in existing]
+    sem = asyncio.Semaphore(4)
+
+    async def _mk_password() -> tuple[str, str]:
+        pw = secrets.token_urlsafe(9)
+        async with sem:
+            return pw, await hash_password_async(pw)
+
+    passwords = await asyncio.gather(*(_mk_password() for _ in to_create))
+
+    results: list[dict[str, Any]] = []
+    created = 0
+    by_index: dict[int, dict[str, Any]] = {}
+    for (i, email, name), (pw, pw_hash) in zip(to_create, passwords, strict=True):
+        user = User(
+            id=ids.new("user"), email=email, name=name, status="active",
+            global_role=None, global_roles=[],
+            password_hash=pw_hash, must_change_password=True,
+        )
+        db.add(user)
+        db.add(CreditWallet(
+            id=ids.new("wallet"), owner_type="user", owner_id=user.id,
+            balance=Decimal("0"), reserved=Decimal("0"),
+        ))
+        db.add(Membership(
+            id=ids.new("membership"), user_id=user.id,
+            group_id=body.group_id, role=body.initial_role,
+        ))
+        created += 1
+        # Welcome credit needs the wallet row visible to the SELECT inside the grant.
+        await db.flush()
+        await grant_welcome_credit(db, user.id, group)
+        by_index[i] = {
+            "row": i, "email": email, "status": "created",
+            "user_id": user.id, "initial_password": pw,
+        }
+
+    failed_emails: list[str] = []
+    for i, email, name in prepared:
+        if i in by_index:
+            results.append(by_index[i])
+        elif name is None:
+            failed_emails.append(email)
+            results.append({"row": i, "email": email, "status": "invalid",
+                            "code": "invalid_email_or_duplicate"})
+        else:
+            results.append({"row": i, "email": email, "status": "exists"})
+
+    try:
+        await db.flush()
+    except IntegrityError as exc:
+        # A concurrent import raced us on some email; the client re-uploads and gets `exists`.
+        await db.rollback()
+        raise _Conflict("bulk import raced another import; retry", {"detail": str(exc.orig)[:200]}) from exc
+
+    await AuditService(db).record(
+        actor=principal.user_id, action="user.bulk_create", target=body.group_id, result="ok",
+        group_id=body.group_id, org_id=group.org_id, initial_role=body.initial_role,
+        requested=len(body.rows), created=created,
+        skipped_existing=sum(1 for r in results if r["status"] == "exists"),
+        invalid=failed_emails[:50],
+    )
+    await db.commit()
+
+    response_body = {
+        "results": results,
+        "summary": {"requested": len(body.rows), "created": created,
+                    "exists": sum(1 for r in results if r["status"] == "exists"),
+                    "invalid": sum(1 for r in results if r["status"] == "invalid")},
+    }
+    await redis.set(cache_key, json.dumps(response_body), ex=_BULK_RESULT_TTL_SEC)
+    return response_body
+
+
+@router.get("/users/resolve")
+async def resolve_user(
+    email: str = Query(min_length=3, max_length=254),
+    principal: Principal = Depends(get_current_principal),
+    db: AsyncSession = Depends(get_db),
+):
+    """Resolve an EXACT email to {id, name} for the volume-share confirm step.
+
+    Any authenticated user may call it: sharing needs "does this address exist, and who is it",
+    and members cannot list users. Only an exact match answers — no enumeration surface beyond
+    what grant-by-email already reveals.
+    """
+    row = (
+        await db.execute(
+            select(User.id, User.name).where(
+                func.lower(User.email) == email.strip().lower(), User.deleted_at.is_(None)
+            )
+        )
+    ).first()
+    if row is None:
+        raise NotFound("user", {"email": email})
+    return {"id": row[0], "name": row[1]}
 
 
 @router.get("/users/{user_id}")
@@ -455,6 +670,99 @@ async def get_user(
         for m in memberships
     ]
     return out
+
+
+@router.get("/users/{user_id}/usage")
+async def get_user_usage(
+    user_id: str,
+    principal: Principal = Depends(get_current_principal),
+    db: AsyncSession = Depends(get_db),
+):
+    """Live resource footprint: sessions, host compute, GPU slices, volumes, wallet.
+
+    Self or an administrator (``user.read``). Everything is CURRENT state, not history — the
+    admin drawer answers "what is this user holding right now?".
+    """
+    if principal.user_id != user_id:
+        principal.require(action="user.read")
+    user = await db.get(User, user_id)
+    if user is None or user.deleted_at is not None:
+        raise NotFound("user", {"user_id": user_id})
+
+    live = (
+        await db.scalars(
+            select(SessionModel).where(
+                SessionModel.owner_user_id == user_id,
+                SessionModel.deleted_at.is_(None),
+                SessionModel.status.notin_(["terminated"]),
+            )
+        )
+    ).all()
+    by_status: dict[str, int] = {}
+    for x in live:
+        by_status[x.status] = by_status.get(x.status, 0) + 1
+    # Host CPU/RAM is only held while a pod exists; paused (cold) sessions gave theirs back.
+    holding = [x for x in live if x.status in ("preparing", "running", "terminating")]
+
+    # GPU slices actually reserved/bound to this user's live sessions.
+    alloc = (
+        await db.execute(
+            select(
+                func.count(Allocation.id),
+                func.coalesce(func.sum(Allocation.gpu_mem_mb), 0),
+                func.coalesce(func.sum(Allocation.gpu_cores), 0),
+            ).join(SessionModel, SessionModel.id == Allocation.session_id).where(
+                SessionModel.owner_user_id == user_id,
+                SessionModel.deleted_at.is_(None),
+                Allocation.status.in_(["reserved", "bound"]),
+            )
+        )
+    ).one()
+
+    vols = (
+        await db.execute(
+            select(
+                func.count(StorageVolume.id),
+                func.coalesce(func.sum(StorageVolume.quota_gb), 0),
+                func.coalesce(func.sum(StorageVolume.used_gb), 0),
+            ).where(
+                StorageVolume.scope == "user",
+                StorageVolume.scope_id == user_id,
+                StorageVolume.deleted_at.is_(None),
+            )
+        )
+    ).one()
+
+    wallet = (
+        await db.scalars(
+            select(CreditWallet).where(
+                CreditWallet.owner_type == "user", CreditWallet.owner_id == user_id
+            )
+        )
+    ).first()
+
+    return {
+        "sessions": {
+            "active": len(live),
+            "running": by_status.get("running", 0),
+            "paused": by_status.get("paused", 0),
+            "queued": by_status.get("queued", 0) + by_status.get("pending", 0),
+        },
+        "host": {
+            "cpu": sum(x.cpu or 0 for x in holding),
+            "mem_gb": sum(x.mem_gb or 0 for x in holding),
+        },
+        "gpu": {
+            "allocations": int(alloc[0]),
+            "gpu_mem_mb": int(alloc[1]),
+            "gpu_cores": int(alloc[2]),
+        },
+        "volumes": {"count": int(vols[0]), "quota_gb": int(vols[1]), "used_gb": int(vols[2])},
+        "wallet": {
+            "balance": float(wallet.balance) if wallet else 0.0,
+            "reserved": float(wallet.reserved) if wallet else 0.0,
+        },
+    }
 
 
 async def _target_group_ids(db: AsyncSession, user_id: str) -> set[str]:
@@ -536,7 +844,7 @@ async def update_user(
     if body.password is not None:
         if not shares_admin_scope:
             raise Forbidden("not permitted: user.reset_password")
-        user.password_hash = hash_password(body.password)
+        user.password_hash = await hash_password_async(body.password)
         user.must_change_password = True
         changes["password"] = {"from": "***", "to": "reset"}
 
@@ -550,6 +858,31 @@ async def update_user(
             actor=principal.user_id, action="user.update", target=user.id, result="ok", changes=changes
         )
     await db.commit()
+
+    # Deactivation reclaims compute: a suspended account keeps its records and volumes, but its
+    # live sessions are terminated and settled exactly like the soft-delete path does.
+    if changes.get("status", {}).get("to") == "suspended":
+        live_ids = list(
+            (
+                await db.execute(
+                    select(SessionModel.id).where(
+                        SessionModel.owner_user_id == user_id,
+                        SessionModel.deleted_at.is_(None),
+                        SessionModel.status.notin_(["terminated"]),
+                    )
+                )
+            ).scalars()
+        )
+        if live_ids:
+            from app.domain.session_service import SessionService  # lazy: avoids an import cycle
+
+            svc = SessionService(db)
+            for sid in live_ids:
+                # terminate() commits internally; idempotent per session.
+                await svc.terminate(sid, forced=True, reason="admin_stopped")
+            user = await db.get(User, user_id)
+            if user is None:
+                raise NotFound("user", {"user_id": user_id})
     return _serialize(user)
 
 
@@ -634,18 +967,34 @@ async def delete_user(
     if user is None or user.deleted_at is not None:
         raise NotFound("user", {"user_id": user_id})
 
-    # Refuse while the user owns a live (non-terminal) session.
-    live = await db.scalar(
-        select(func.count())
-        .select_from(SessionModel)
-        .where(
-            SessionModel.owner_user_id == user_id,
-            SessionModel.deleted_at.is_(None),
-            SessionModel.status.notin_(["terminated", "error"]),
-        )
+    # Live sessions: the delete screen promises "running sessions are terminated and settled",
+    # so the soft path does exactly that — terminate (settle + refund the hold) each non-terminal
+    # session as admin_stopped, then deactivate. Only a HARD delete still refuses, because it
+    # erases the rows the ledger references.
+    live_ids = list(
+        (
+            await db.execute(
+                select(SessionModel.id).where(
+                    SessionModel.owner_user_id == user_id,
+                    SessionModel.deleted_at.is_(None),
+                    SessionModel.status.notin_(["terminated"]),
+                )
+            )
+        ).scalars()
     )
-    if live and live > 0:
-        raise _Conflict("user has running sessions", {"running": int(live)})
+    if live_ids and hard:
+        raise _Conflict("user has running sessions", {"running": len(live_ids)})
+    if live_ids:
+        from app.domain.session_service import SessionService  # lazy: avoids an import cycle
+
+        svc = SessionService(db)
+        for sid in live_ids:
+            # terminate() commits internally (it serialises on the session row); idempotent.
+            await svc.terminate(sid, forced=True, reason="admin_stopped")
+        # terminate()'s commits expired the identity map; re-fetch the row we mutate below.
+        user = await db.get(User, user_id)
+        if user is None or user.deleted_at is not None:
+            raise NotFound("user", {"user_id": user_id})
 
     # Snapshot the name and email into the audit detail: after a hard delete the User row is gone
     # and the name can no longer be resolved.

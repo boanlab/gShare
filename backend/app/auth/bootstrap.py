@@ -42,40 +42,50 @@ _BASE_IMAGES = [
 # The default GPU offering catalogue: one full-card row per model. The session wizard derives the
 # per-model fraction tiers from the full-card VRAM.
 #
+# Host cpu/mem/disk are IDENTICAL across models by policy (host resources are GPU-agnostic;
+# the wizard's compute presets are the real knob — these are only the raw-API fallback).
 # gpu_model has to match the name inventory reports (GpuDevice.model) or nothing schedules against
 # it — adjust it to the model names your fleet actually reports. cpu, mem, and disk are the host
 # resources that accompany a full card, and credit_per_hour is the hourly rate; both are suggested
 # defaults an administrator can change. min_cuda is the architecture's minimum CUDA toolkit:
 # Ampere sm_80 -> 11.0, Ada sm_89 -> 11.8, Hopper sm_90 -> 12.0, Blackwell sm_120 -> 12.8.
 _GPU_OFFERINGS = [
-    {"name": "RTX 4090",       "gpu_model": "NVIDIA GeForce RTX 4090",       "gpu_mem_mb": 24564, "cpu": 8,  "mem_gb": 48,  "disk_gb": 100, "credit_per_hour": "100",  "min_cuda": "11.8"},
-    {"name": "RTX 5090",       "gpu_model": "NVIDIA GeForce RTX 5090",       "gpu_mem_mb": 32768, "cpu": 12, "mem_gb": 96,  "disk_gb": 150, "credit_per_hour": "150",  "min_cuda": "12.8"},
-    {"name": "RTX PRO 5000",   "gpu_model": "NVIDIA RTX PRO 5000 Blackwell", "gpu_mem_mb": 49152, "cpu": 16, "mem_gb": 128, "disk_gb": 200, "credit_per_hour": "200",  "min_cuda": "12.8"},
-    {"name": "RTX PRO 6000",   "gpu_model": "NVIDIA RTX PRO 6000 Blackwell", "gpu_mem_mb": 98304, "cpu": 24, "mem_gb": 256, "disk_gb": 400, "credit_per_hour": "300",  "min_cuda": "12.8"},
-    {"name": "A100 40GB PCIe", "gpu_model": "NVIDIA A100-PCIE-40GB",         "gpu_mem_mb": 40960, "cpu": 24, "mem_gb": 128, "disk_gb": 300, "credit_per_hour": "300",  "min_cuda": "11.0"},
-    {"name": "A100 80GB PCIe", "gpu_model": "NVIDIA A100 80GB PCIe",         "gpu_mem_mb": 81920, "cpu": 32, "mem_gb": 256, "disk_gb": 400, "credit_per_hour": "400",  "min_cuda": "11.0"},
-    {"name": "A100 40GB SXM4", "gpu_model": "NVIDIA A100-SXM4-40GB",         "gpu_mem_mb": 40960, "cpu": 24, "mem_gb": 128, "disk_gb": 300, "credit_per_hour": "350",  "min_cuda": "11.0"},
-    {"name": "A100 80GB SXM4", "gpu_model": "NVIDIA A100-SXM4-80GB",         "gpu_mem_mb": 81920, "cpu": 32, "mem_gb": 256, "disk_gb": 400, "credit_per_hour": "450",  "min_cuda": "11.0"},
-    {"name": "H100 80GB PCIe", "gpu_model": "NVIDIA H100 PCIe",              "gpu_mem_mb": 81920, "cpu": 32, "mem_gb": 512, "disk_gb": 500, "credit_per_hour": "800",  "min_cuda": "12.0"},
-    {"name": "H100 80GB SXM5", "gpu_model": "NVIDIA H100 80GB HBM3",         "gpu_mem_mb": 81920, "cpu": 32, "mem_gb": 512, "disk_gb": 500, "credit_per_hour": "1000", "min_cuda": "12.0"},
-    {"name": "H100 NVL 94GB",  "gpu_model": "NVIDIA H100 NVL",               "gpu_mem_mb": 96256, "cpu": 48, "mem_gb": 640, "disk_gb": 600, "credit_per_hour": "1100", "min_cuda": "12.0"},
+    {"name": "RTX 4090",       "gpu_model": "NVIDIA GeForce RTX 4090",       "gpu_mem_mb": 24564, "cpu": 4,  "mem_gb": 8,  "disk_gb": 50, "credit_per_hour": "100",  "min_cuda": "11.8"},
+    {"name": "RTX 5090",       "gpu_model": "NVIDIA GeForce RTX 5090",       "gpu_mem_mb": 32768, "cpu": 4, "mem_gb": 8,  "disk_gb": 50, "credit_per_hour": "150",  "min_cuda": "12.8"},
+    {"name": "RTX PRO 5000",   "gpu_model": "NVIDIA RTX PRO 5000 Blackwell", "gpu_mem_mb": 49152, "cpu": 4, "mem_gb": 8, "disk_gb": 50, "credit_per_hour": "200",  "min_cuda": "12.8"},
+    {"name": "RTX PRO 6000",   "gpu_model": "NVIDIA RTX PRO 6000 Blackwell", "gpu_mem_mb": 98304, "cpu": 4, "mem_gb": 8, "disk_gb": 50, "credit_per_hour": "300",  "min_cuda": "12.8"},
+    {"name": "A100 40GB PCIe", "gpu_model": "NVIDIA A100-PCIE-40GB",         "gpu_mem_mb": 40960, "cpu": 4, "mem_gb": 8, "disk_gb": 50, "credit_per_hour": "300",  "min_cuda": "11.0"},
+    {"name": "A100 80GB PCIe", "gpu_model": "NVIDIA A100 80GB PCIe",         "gpu_mem_mb": 81920, "cpu": 4, "mem_gb": 8, "disk_gb": 50, "credit_per_hour": "400",  "min_cuda": "11.0"},
+    {"name": "A100 40GB SXM4", "gpu_model": "NVIDIA A100-SXM4-40GB",         "gpu_mem_mb": 40960, "cpu": 4, "mem_gb": 8, "disk_gb": 50, "credit_per_hour": "350",  "min_cuda": "11.0"},
+    {"name": "A100 80GB SXM4", "gpu_model": "NVIDIA A100-SXM4-80GB",         "gpu_mem_mb": 81920, "cpu": 4, "mem_gb": 8, "disk_gb": 50, "credit_per_hour": "450",  "min_cuda": "11.0"},
+    {"name": "H100 80GB PCIe", "gpu_model": "NVIDIA H100 PCIe",              "gpu_mem_mb": 81920, "cpu": 4, "mem_gb": 8, "disk_gb": 50, "credit_per_hour": "800",  "min_cuda": "12.0"},
+    {"name": "H100 80GB SXM5", "gpu_model": "NVIDIA H100 80GB HBM3",         "gpu_mem_mb": 81920, "cpu": 4, "mem_gb": 8, "disk_gb": 50, "credit_per_hour": "1000", "min_cuda": "12.0"},
+    {"name": "H100 NVL 94GB",  "gpu_model": "NVIDIA H100 NVL",               "gpu_mem_mb": 96256, "cpu": 4, "mem_gb": 8, "disk_gb": 50, "credit_per_hour": "1100", "min_cuda": "12.0"},
 ]
 
 
 # Default resource presets, split into compute (cpu, mem, disk) and gpu (a per-model fraction).
+# The compute ladder is sized for a shared education fleet: host CPU/RAM are billed only on
+# CPU-class sessions, so on GPU sessions the preset IS the control — S is the sensible default for
+# coursework, XL exists for the rare heavy preprocessing job. The wizard also offers a custom
+# panel; oversized custom requests are caught by the host-headroom admission gate.
 _COMPUTE_PRESETS = [
-    {"name": "Compute S", "cpu": 4,  "mem_gb": 32,  "disk_gb": 100},
-    {"name": "Compute M", "cpu": 8,  "mem_gb": 64,  "disk_gb": 200},
-    {"name": "Compute L", "cpu": 16, "mem_gb": 128, "disk_gb": 400},
+    {"name": "Compute S",  "cpu": 2,  "mem_gb": 4,  "disk_gb": 20},
+    {"name": "Compute M",  "cpu": 4,  "mem_gb": 8,  "disk_gb": 50},
+    {"name": "Compute L",  "cpu": 8,  "mem_gb": 16, "disk_gb": 100},
+    {"name": "Compute XL", "cpu": 16, "mem_gb": 24, "disk_gb": 200},  # fits the smallest GPU node (31GB allocatable)
 ]
 # GPU presets are fractional: VRAM is the chosen model's full card multiplied by gpu_frac. The core
 # share is a suggested value derived from the same fraction; exclusive takes 100%.
+# The 1/2 and 1/4 tiers align with MIG profiles on MIG-capable cards (RTX PRO 6000 Blackwell:
+# 2g.48gb / 1g.24gb), so those requests can land on the hardware-isolated pool at no capacity
+# cost; 1/8 and 1/16 are hami-core only. The old 1/32 tier is gone — ~3GB on a modern card does
+# not fit real framework contexts and only fragmented capacity.
 _GPU_PRESETS = [
     {"name": "GPU XL (1/2)",   "gpu_frac": 0.5,     "gpu_cores": 50,  "mode": "fractional"},
     {"name": "GPU L (1/4)",    "gpu_frac": 0.25,    "gpu_cores": 25,  "mode": "fractional"},
     {"name": "GPU M (1/8)",    "gpu_frac": 0.125,   "gpu_cores": 13,  "mode": "fractional"},
     {"name": "GPU S (1/16)",   "gpu_frac": 0.0625,  "gpu_cores": 6,   "mode": "fractional"},
-    {"name": "GPU SS (1/32)",  "gpu_frac": 0.03125, "gpu_cores": 3,   "mode": "fractional"},
     {"name": "GPU Exclusive (full card)", "gpu_frac": 1.0, "gpu_cores": 100, "mode": "exclusive"},
 ]
 # Preset names superseded by the split compute/gpu presets, removed on every re-seed. This also
@@ -84,14 +94,18 @@ _GPU_PRESETS = [
 _LEGACY_PRESET_NAMES = [
     "Small (1/4)", "Medium (1/2)", "Large (full)", "XLarge (48G)",
     "GPU S (1/8)", "GPU M (1/4)", "GPU L (1/2)", "GPU SS (1/16)", "GPU SSS (1/32)",
+    "GPU SS (1/32)",
     "컴퓨트 S", "컴퓨트 M", "컴퓨트 L", "GPU 전용 (풀카드)",
 ]
 
 # The default global resource policy: the guardrail applied when no more specific policy exists.
-# Administrators can change it.
+# Administrators can change it. Sized for a heavily shared fleet (many users per card): one GPU
+# session at a time per user, a short queue allowance, a 12h lifetime cap, a 30min idle window,
+# and per-user sums bounded to one full modern card. Seeded create-if-absent — existing installs
+# keep their edited policy.
 _DEFAULT_POLICY = {
-    "max_concurrent": 3, "max_queued": 5, "max_runtime_min": 2880, "idle_timeout_sec": 3600,
-    "limits": {"cpu": 64, "mem_gb": 512, "gpu_mem_mb": 196608, "gpu_cores": 800, "storage_gb": 1000},
+    "max_concurrent": 1, "max_queued": 2, "max_runtime_min": 720, "idle_timeout_sec": 3600,
+    "limits": {"cpu": 24, "mem_gb": 256, "gpu_mem_mb": 98304, "gpu_cores": 100, "storage_gb": 500, "volume_gb": 500},
 }
 
 
@@ -147,7 +161,7 @@ async def seed_default_policy() -> None:
 
 
 async def seed_offerings() -> None:
-    """Ensure the default GPU offering catalogue exists, skipping duplicates by gpu_model.
+    """Ensure the default GPU offering catalogue exists, skipping duplicates by name.
 
     One full-card row per model; the wizard derives the fraction tiers. If your fleet reports GPU
     model names that differ from these, adjust gpu_model or nothing will schedule against them.
@@ -158,7 +172,10 @@ async def seed_offerings() -> None:
     async with sm() as db:
         async with db.begin():
             for spec in _GPU_OFFERINGS:
-                existing = await db.scalar(select(Offering).where(Offering.gpu_model == spec["gpu_model"]))
+                # Dedup by NAME, not gpu_model: administrators adjust gpu_model to the exact
+                # string the fleet reports (e.g. "... Max-Q Workstation Edition"), and a
+                # model-keyed check would re-seed a duplicate on every restart after that.
+                existing = await db.scalar(select(Offering).where(Offering.name == spec["name"]))
                 if existing is not None:
                     # Backfill min_cuda on an existing offering that predates the column.
                     if existing.min_cuda is None and spec.get("min_cuda"):

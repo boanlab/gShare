@@ -80,6 +80,11 @@ async def test_must_change_password_allows_change_password_path(db):
     from types import SimpleNamespace
 
     from app.api.deps import get_current_principal
+    from app.db.models import User
+
+    # The principal resolver now verifies the account row exists and is not suspended/deleted.
+    async with db.begin():
+        db.add(User(id="usr_x", email="x@example.com", name="x", status="active"))
 
     tok = _make_token(must_change_password=True)
     req = SimpleNamespace(url=SimpleNamespace(path="/api/v1/auth/change-password"))
@@ -87,3 +92,30 @@ async def test_must_change_password_allows_change_password_path(db):
         request=req, authorization=f"Bearer {tok}", access_token=None, db=db
     )
     assert principal.user_id == "usr_x"
+
+
+@pytest.mark.asyncio
+async def test_suspended_user_is_rejected_on_login_and_token(db, fake_redis):
+    """Suspension locks the account out on both paths: fresh login and an existing token."""
+    from types import SimpleNamespace
+
+    from app.api.deps import get_current_principal
+    from app.api.users_router import _LoginRequest, auth_login
+    from app.auth import rbac
+    from app.core.errors import Forbidden, Unauthenticated
+    from app.db.models import User
+
+    async with db.begin():
+        db.add(User(id="usr_susp", email="susp@example.com", name="s", status="suspended"))
+
+    fake_req = SimpleNamespace(headers={}, client=None)
+    with pytest.raises(Unauthenticated):
+        await auth_login(_LoginRequest(email="susp@example.com", password="x"), fake_req, db)
+
+    rbac._PRINCIPAL_CACHE.clear()
+    tok = _make_token(sub="usr_susp")
+    req = SimpleNamespace(url=SimpleNamespace(path="/api/v1/sessions"))
+    with pytest.raises(Forbidden):
+        await get_current_principal(
+            request=req, authorization=f"Bearer {tok}", access_token=None, db=db
+        )

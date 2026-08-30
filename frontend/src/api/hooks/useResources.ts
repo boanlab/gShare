@@ -54,7 +54,7 @@ export interface ResourcePolicy {
   cpu_session_max_concurrent?: number;
   cpu_session_max_runtime_min?: number;
   cpu_session_idle_timeout_sec?: number;
-  limits: { cpu: number; mem_gb: number; gpu_mem_mb: number; gpu_cores: number; storage_gb: number };
+  limits: { cpu: number; mem_gb: number; gpu_mem_mb: number; gpu_cores: number; storage_gb: number; volume_gb?: number; shared_pool?: boolean };
 }
 
 export const resourceKeys = {
@@ -77,14 +77,19 @@ export interface GpuModelAvail {
   card_mem_mb: number;
   devices: GpuDeviceAvail[];
 }
-export function useGpuAvailability() {
+export function useGpuAvailability(opts: { fleet?: boolean } = {}) {
   return useQuery({
-    queryKey: ['gpu-availability'],
+    queryKey: ['gpu-availability', opts.fleet ? 'fleet' : 'mine'],
     queryFn: async () => {
-      const { data } = await raw.GET('/api/v1/sessions/gpu-availability');
+      const { data } = await raw.GET('/api/v1/sessions/gpu-availability', opts.fleet ? { params: { query: { fleet: true } } } : undefined);
       return (data as { data?: GpuModelAvail[] } | undefined)?.data ?? [];
     },
     refetchInterval: 15000,   // availability moves, so refresh periodically
+    // Free capacity is the one number that must never be stale when you look at it: interval
+    // refetches pause while the tab is in the background (an admin cordoning a node in another
+    // tab), and the global 30s staleTime would otherwise suppress the refetch on focus.
+    staleTime: 0,
+    refetchOnWindowFocus: 'always',
   });
 }
 
@@ -267,7 +272,7 @@ export interface CreatePolicyBody {
   max_queued: number;
   max_runtime_min: number;
   idle_timeout_sec: number;
-  limits: { cpu: number; mem_gb: number; gpu_mem_mb: number; gpu_cores: number; storage_gb: number };
+  limits: { cpu: number; mem_gb: number; gpu_mem_mb: number; gpu_cores: number; storage_gb: number; volume_gb?: number; shared_pool?: boolean };
 }
 
 // POST /resource-policies — (scope,scope_id) UNIQUE.
@@ -301,9 +306,9 @@ export interface EffectivePolicy {
   scope?: PolicyScope;
   max_concurrent?: number | null;
   max_queued?: number | null;
-  limits?: { gpu_mem_mb: number; gpu_cores: number; cpu: number; mem_gb: number; storage_gb: number };
-  used?: { gpu_mem_mb: number; gpu_cores: number; cpu: number; mem_gb: number; storage_gb: number; active: number; queued: number };
-  remaining?: { gpu_mem_mb: number | null; gpu_cores: number | null; cpu: number | null; mem_gb: number | null; storage_gb: number | null };
+  limits?: { gpu_mem_mb: number; gpu_cores: number; cpu: number; mem_gb: number; storage_gb: number; volume_gb?: number };
+  used?: { gpu_mem_mb: number; gpu_cores: number; cpu: number; mem_gb: number; storage_gb: number; volume_gb?: number; active: number; queued: number };
+  remaining?: { gpu_mem_mb: number | null; gpu_cores: number | null; cpu: number | null; mem_gb: number | null; storage_gb: number; volume_gb?: number | null };
 }
 
 // GET /resource-policies/effective — the caller's effective policy with current usage and headroom,

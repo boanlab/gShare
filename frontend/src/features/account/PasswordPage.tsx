@@ -3,7 +3,7 @@ import { Link, useNavigate } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import { useAuthStore } from '@/auth/authStore';
 import { useUiStore } from '@/store/uiStore';
-import { PageHeader, BackLink } from '@/components/PageHeader';
+import { PageHeader } from '@/components/PageHeader';
 import { Field, DisabledReason } from '@/components/Field';
 import { useUnsavedGuard, unsavedGuardProps } from '@/hooks/useUnsavedGuard';
 
@@ -42,13 +42,12 @@ export function PasswordPage() {
   }
 
   return (
-    <div className="w-full">
+    <div className="w-full max-w-2xl">
       <PageHeader
         title={t('auth.changePassword')}
         crumbs={[{ label: t('account.title'), to: '/account' }, { label: t('auth.changePassword') }]}
-        actions={<BackLink to="/account" label={t('account.backToAccount')} />}
       />
-      <div className="gs-card max-w-xl">
+      <div className="gs-card">
         <form className="space-y-3" {...unsavedGuardProps} onSubmit={submit} noValidate>
           <Field label={t('auth.currentPassword')} required>
             {(ids) => (
@@ -70,12 +69,12 @@ export function PasswordPage() {
               <input {...ids} type="password" autoComplete="new-password" className="gs-input w-full" value={pw2} onChange={(e) => setPw2(e.target.value)} />
             )}
           </Field>
-          <DisabledReason reasons={[
-            !cur && t('auth.currentPassword'),
-            !pw && t('auth.password'),
-            !pw2 && t('auth.confirmPassword'),
-          ].filter(Boolean) as string[]} />
-          <div className="flex gap-2 pt-1">
+          <div className="flex justify-end items-center gap-3 pt-1 flex-wrap">
+            <DisabledReason reasons={[
+              !cur && t('auth.currentPassword'),
+              !pw && t('auth.password'),
+              !pw2 && t('auth.confirmPassword'),
+            ].filter(Boolean) as string[]} />
             <button type="submit" className="gs-btn gs-btn-primary disabled:opacity-50" disabled={busy || !cur || !pw || !pw2 || tooShort || mismatch}>
               {busy ? t('auth.changing') : t('auth.changePassword')}
             </button>

@@ -1,0 +1,45 @@
+# HAMi values overlay enabling a dynamic-MIG pool alongside hami-core cards.
+#
+#   helm upgrade hami hami/hami -n kube-system --reuse-values -f deploy/hami/mig-values.example.yaml
+#
+# How the pool split works with GShare:
+#   - GShare's per-card pool (gpu_device.desired_mode=mig, set from the node devices screen)
+#     drains the card, then the mig-agent machinery enables MIG on it; HAMi's device plugin
+#     re-registers the card with "mode":"mig" and GShare's inventory records it.
+#   - Students keep requesting fractional tiers. The scheduler prefers a MIG card when the tier
+#     aligns with a hardware profile (1/2 -> 2g.48gb, 1/4 -> 1g.24gb on RTX PRO 6000 Blackwell)
+#     and reserves the rounded profile size, so MIG capacity is never phantom-advertised.
+#   - MIG cards cannot yield/lend (cuda-checkpoint needs one process per physical card).
+#
+# knownMigGeometries drives HAMi's dynamic carving. Groups are alternatives per card; HAMi picks
+# the geometry matching demand at schedule time.
+devicePlugin:
+  # Per-node overrides live in the hami device-plugin ConfigMap ("operatingmode": "mig") when a
+  # whole node should be MIG; with GShare's per-card pools, prefer per-card enablement via the
+  # mig-agent and leave node-level mode unset.
+  migStrategy: mixed
+scheduler:
+  defaultSchedulerPolicy:
+    nodeSchedulerPolicy: binpack
+    gpuSchedulerPolicy: binpack
+knownMigGeometries:
+  - models: ["RTX PRO 6000", "NVIDIA RTX PRO 6000 Blackwell"]
+    allowedGeometries:
+      - group: "group1"
+        geometries:
+          - name: 1g.24gb
+            memory: 24576
+            count: 4
+      - group: "group2"
+        geometries:
+          - name: 2g.48gb
+            memory: 49152
+            count: 2
+      - group: "group3"
+        geometries:
+          - name: 2g.48gb
+            memory: 49152
+            count: 1
+          - name: 1g.24gb
+            memory: 24576
+            count: 2

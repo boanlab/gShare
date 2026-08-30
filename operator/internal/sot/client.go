@@ -35,6 +35,7 @@ const (
 	inventoryNodePath   = "/internal/inventory/nodes"
 	inventoryDriftPath  = "/internal/inventory/drift"
 	nodeHealthPath      = "/internal/nodes/health-events"
+	volumeSyncPath      = "/internal/volumes/sync"
 )
 
 // maxAttempts bounds the retry loop on 5xx / transport errors.
@@ -64,6 +65,10 @@ type Config struct {
 type StatusEvent struct {
 	Phase        string `json:"phase"` // Pending|Preparing|Running|Terminating|Terminated|Error
 	BoundGpuUUID string `json:"bound_gpu_uuid,omitempty"`
+	// NodeName is the k8s node the session pod landed on (pod.spec.nodeName), reported so the
+	// control plane can show WHERE a session runs — the only source for CPU sessions, which have
+	// no bound GPU to derive the node from.
+	NodeName string `json:"node_name,omitempty"`
 	// YieldState="Yielded" on a successful in-place yield (Pod alive, VRAM evicted); empty on cold
 	// pause/fallback. The control plane keys yield-vs-cold accounting on the operator's actual action.
 	YieldState string    `json:"yield_state,omitempty"`
@@ -86,6 +91,37 @@ type AuditEvent struct {
 	TS      time.Time      `json:"ts"`
 }
 
+// VolumeObserved is one session-volume PVC as the operator sees it (POST /internal/volumes/sync).
+type VolumeObserved struct {
+	Name       string `json:"name"`                 // PVC name (sanitized volume id)
+	VolumeID   string `json:"volume_id,omitempty"`  // ledger id from the gshare.io/volume-id annotation
+	CapacityGb int    `json:"capacity_gb"`          // the claim's current request
+	UsedBytes  *int64 `json:"used_bytes,omitempty"` // kubelet volume stats; nil when not mounted anywhere
+	Mounted    bool   `json:"mounted"`
+}
+
+// SessionDisk is one session pod's ephemeral-storage (scratch disk) reading, riding along on
+// POST /internal/volumes/sync so the control plane can warn before the kubelet evicts on overuse.
+type SessionDisk struct {
+	Name                string `json:"name"` // CR name, i.e. the sanitized session id
+	EphemeralUsedBytes  int64  `json:"ephemeral_used_bytes"`
+	EphemeralLimitBytes int64  `json:"ephemeral_limit_bytes"`
+}
+
+// VolumeDirective is the control plane's answer for one observed PVC.
+type VolumeDirective struct {
+	Name     string `json:"name"`
+	VolumeID string `json:"volume_id,omitempty"`
+	QuotaGb  *int   `json:"quota_gb,omitempty"` // desired size; grow the claim up to it
+	Reclaim  bool   `json:"reclaim"`            // deleted past grace: drop the PVC and its data
+}
+
+// VolumeSyncResult is the body of the sync response.
+type VolumeSyncResult struct {
+	Volumes []VolumeDirective `json:"volumes"`
+	Orphans int               `json:"orphans"`
+}
+
 // Reporter is the interface the controllers depend on (allows a fake in tests).
 type Reporter interface {
 	Report(ctx context.Context, sessionID string, ev StatusEvent) error
@@ -94,6 +130,10 @@ type Reporter interface {
 	UpsertNode(ctx context.Context, n Node) error
 	ReportDrift(ctx context.Context, uuid string, used, total int) error
 	CreateNodeHealthEvent(ctx context.Context, ev NodeHealthEvent) (NodeHealthEvent, error)
+	// SyncVolumes reports every session-volume PVC (plus each session pod's scratch-disk
+	// reading) and returns, per claim, the quota to grow to and whether it may be reclaimed.
+	// The operator never decides either on its own.
+	SyncVolumes(ctx context.Context, vols []VolumeObserved, sessions []SessionDisk) (VolumeSyncResult, error)
 }
 
 // Client is the HTTP implementation of Reporter.
@@ -325,6 +365,8 @@ type Node struct {
 	NodeCPU    int    `json:"node_cpu,omitempty"`
 	NodeMemGB  int    `json:"node_mem_gb,omitempty"`
 	NodeDiskGB int    `json:"node_disk_gb,omitempty"`
+	// Role classifies the node for the console: master | gpu | cpu | storage.
+	Role string `json:"role,omitempty"`
 	// LosslessCapable: true when the node labels mark lossless-pause prerequisites (cuda-checkpoint + CRIU) ready.
 	LosslessCapable bool `json:"lossless_capable,omitempty"`
 }
@@ -336,6 +378,31 @@ func (c *Client) UpsertNode(ctx context.Context, n Node) error {
 	}{Node: n, ClusterID: c.cfg.ClusterID}
 	_, err := c.doJSON(ctx, inventoryNodePath, body, "")
 	return err
+}
+
+// SyncVolumes posts the observed PVCs (and session scratch-disk readings) and decodes the
+// directives.
+func (c *Client) SyncVolumes(ctx context.Context, vols []VolumeObserved, sessions []SessionDisk) (VolumeSyncResult, error) {
+	body := struct {
+		Volumes   []VolumeObserved `json:"volumes"`
+		Sessions  []SessionDisk    `json:"sessions"`
+		ClusterID string           `json:"cluster_id,omitempty"`
+	}{Volumes: vols, Sessions: sessions, ClusterID: c.cfg.ClusterID}
+	if body.Volumes == nil {
+		body.Volumes = []VolumeObserved{}
+	}
+	if body.Sessions == nil {
+		body.Sessions = []SessionDisk{}
+	}
+	raw, err := c.doJSON(ctx, volumeSyncPath, body, "")
+	if err != nil {
+		return VolumeSyncResult{}, err
+	}
+	var out VolumeSyncResult
+	if err := json.Unmarshal(raw, &out); err != nil {
+		return VolumeSyncResult{}, fmt.Errorf("sot: decode volume sync response: %w", err)
+	}
+	return out, nil
 }
 
 // ReportDrift signals Σused > total drift so the control plane can correct toward the
@@ -392,4 +459,22 @@ func (c *Client) CreateNodeHealthEvent(ctx context.Context, ev NodeHealthEvent) 
 		}
 	}
 	return created, nil
+}
+
+// ImageBuildStatusEvent is the payload of POST /internal/image-builds/{id}/status.
+type ImageBuildStatusEvent struct {
+	Phase    string `json:"phase"` // queued|running|succeeded|failed
+	ImageRef string `json:"image_ref,omitempty"`
+	Error    string `json:"error,omitempty"`
+	LogTail  string `json:"log_tail,omitempty"`
+}
+
+// ReportImageBuild delivers a kaniko build's progress/outcome to the control plane.
+// Same retry/idempotency semantics as Report.
+func (c *Client) ReportImageBuild(ctx context.Context, buildID string, ev ImageBuildStatusEvent) error {
+	if len(ev.LogTail) > 16384 {
+		ev.LogTail = ev.LogTail[len(ev.LogTail)-16384:]
+	}
+	_, err := c.doJSON(ctx, "/internal/image-builds/"+buildID+"/status", ev, "")
+	return err
 }

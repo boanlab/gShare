@@ -101,13 +101,20 @@ async def node_health_event(
         # Warning, critical, and cordon events notify the system administrators.
         if (ev.severity or "").lower() in ("warn", "warning", "critical") or (ev.action or "").lower() == "cordon":
             from app.domain.notification_service import NotificationService
+            from app.domain.webhook_outbox import emit_webhook_safe
 
             notifier = NotificationService(db)
             await notifier.notify(
                 await notifier.system_admins(), "node_health",
                 f"Node health: {ev.kind}",
                 f"Node '{hostname}': {ev.kind} (severity={ev.severity}, action={ev.action}).",
+                params={"hostname": hostname, "kind": ev.kind, "severity": ev.severity,
+                        "action": ev.action},
                 node_id=ev.node_id, kind=ev.kind, action=ev.action,
             )
+            await emit_webhook_safe(db, "node_health.event", {
+                "node_id": ev.node_id, "hostname": hostname, "kind": ev.kind,
+                "severity": ev.severity, "action": ev.action,
+            })
     log.warning("node health event: node=%s kind=%s action=%s", ev.node_id, ev.kind, ev.action)
     return {"accepted": True}

@@ -1,8 +1,8 @@
 import { useEffect } from 'react';
 
-const SUFFIX = 'GShare';
+const SUFFIX = 'gShare';
 
-/** Per-screen document title, `<name> · GShare`. `null` keeps the current title. */
+/** Per-screen document title, `<name> · gShare`. `null` keeps the current title. */
 export function useDocumentTitle(title: string | null | undefined) {
   useEffect(() => {
     if (!title) return;

@@ -2,6 +2,7 @@ import { create } from 'zustand';
 import { persist } from 'zustand/middleware';
 import { parseJwt, type JwtClaims } from '@/lib/jwt';
 import { changePasswordRequest, passwordLogin } from '@/auth/authApi';
+import { queryClient } from '@/api/queryClient';
 import { ROLE_ORDER } from '@/lib/rbac';
 
 // Pick the highest role across every membership plus org_admin_orgs; gating uses that top rank.
@@ -22,13 +23,17 @@ function highestRole(roles: string[]): string | undefined {
 export interface Membership {
   group_id: string;
   project_name: string;
+  org_id?: string | null;
+  org_name?: string | null;
   role: string; // org_admin / group_admin / member ...
+  has_group_admin?: boolean; // someone in the group can approve credit requests
 }
 
 interface AuthState {
   accessToken?: string;
   claims: JwtClaims;
   memberships: Membership[];
+  displayName?: string;             // from /auth/me — the JWT carries no name
   orgAdminOrgs: string[];        // organizations this user administers; authority survives even with no groups
   activeProjectId?: string;
   membershipRole?: string;       // highest rank across all memberships and org_admin_orgs; what gating uses
@@ -43,7 +48,7 @@ interface AuthState {
   changePassword(newPw: string, currentPw?: string): Promise<void>;
   logout(reason?: string): void;
   setActiveProject(pid: string): void;
-  setMeContext(m: Membership[], orgAdminOrgs: string[]): void;
+  setMeContext(m: Membership[], orgAdminOrgs: string[], displayName?: string): void;
   setMeLoaded(): void;
 }
 
@@ -62,6 +67,13 @@ export const useAuthStore = create<AuthState>()(
 
       async loginPassword(email, password) {
         const { access_token } = await passwordLogin(email, password);
+        // A different account may sign in on the same browser: drop the previous user's cached
+        // queries and membership context, or their sessions/policy keep rendering for staleTime.
+        queryClient.clear();
+        set({
+          memberships: [], orgAdminOrgs: [], activeProjectId: undefined,
+          membershipRole: undefined, meLoaded: false, displayName: undefined,
+        });
         applyTokens(set, access_token);
       },
 
@@ -73,6 +85,7 @@ export const useAuthStore = create<AuthState>()(
       },
 
       logout() {
+        queryClient.clear();
         set({
           accessToken: undefined,
           claims: {},
@@ -82,6 +95,7 @@ export const useAuthStore = create<AuthState>()(
           activeProjectId: undefined,
           membershipRole: undefined,
           meLoaded: false,
+          displayName: undefined,
         });
       },
 
@@ -91,12 +105,12 @@ export const useAuthStore = create<AuthState>()(
         set({ activeProjectId: pid });
       },
 
-      setMeContext(memberships, orgAdminOrgs) {
+      setMeContext(memberships, orgAdminOrgs, displayName) {
         // Gating rank: the highest of every membership role, plus org_admin when org_admin_orgs is
         // non-empty.
         const roles = memberships.map((m) => m.role);
         if (orgAdminOrgs.length) roles.push('org_admin');
-        set({ memberships, orgAdminOrgs, membershipRole: highestRole(roles), meLoaded: true });
+        set({ memberships, orgAdminOrgs, membershipRole: highestRole(roles), meLoaded: true, displayName });
       },
       // Also called when /auth/me fails.
       setMeLoaded() {
@@ -114,6 +128,7 @@ export const useAuthStore = create<AuthState>()(
         orgAdminOrgs: s.orgAdminOrgs,
         membershipRole: s.membershipRole,
         activeProjectId: s.activeProjectId,
+        displayName: s.displayName,
       }),
     },
   ),

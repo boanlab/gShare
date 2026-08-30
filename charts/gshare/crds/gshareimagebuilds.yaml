@@ -1,0 +1,121 @@
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.15.0
+  name: gshareimagebuilds.gshare.io
+spec:
+  group: gshare.io
+  names:
+    kind: GShareImageBuild
+    listKind: GShareImageBuildList
+    plural: gshareimagebuilds
+    singular: gshareimagebuild
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .spec.buildId
+      name: Build
+      type: string
+    - jsonPath: .spec.targetRef
+      name: Target
+      type: string
+    - jsonPath: .status.phase
+      name: Phase
+      type: string
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1
+    schema:
+      openAPIV3Schema:
+        description: GShareImageBuild is the Schema for the gshareimagebuilds API.
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: GShareImageBuildSpec describes one requested image build.
+            properties:
+              buildArgs:
+                additionalProperties:
+                  type: string
+                description: BuildArgs are --build-arg key/values.
+                type: object
+              buildId:
+                description: BuildId is the control-plane ImageBuild row id (bld_...);
+                  callbacks key on it.
+                type: string
+              contextSubPath:
+                description: ContextSubPath is the build context inside the repo (source=git).
+                type: string
+              dockerfile:
+                description: Dockerfile is the inline Dockerfile content (source=dockerfile).
+                  Max 32KB.
+                type: string
+              gitRef:
+                description: GitRef is the branch/tag/commit for source=git.
+                type: string
+              gitUrl:
+                description: GitUrl is the clone URL (source=git). Public repos only.
+                type: string
+              groupId:
+                description: GroupId is the project the build belongs to (informational).
+                type: string
+              owner:
+                description: Owner is the requesting user id (informational; labels/annotations
+                  only).
+                type: string
+              source:
+                description: Source selects the build context kind.
+                enum:
+                - dockerfile
+                - git
+                type: string
+              targetRef:
+                description: TargetRef is the full image reference kaniko pushes on
+                  success.
+                type: string
+            required:
+            - buildId
+            - source
+            - targetRef
+            type: object
+          status:
+            description: GShareImageBuildStatus reports build progress.
+            properties:
+              jobRef:
+                description: JobRef is the namespace/name of the kaniko Job.
+                type: string
+              message:
+                description: Message carries the failure detail (kaniko log tail)
+                  on Failed.
+                type: string
+              phase:
+                description: 'Phase: Pending -> Running -> Succeeded | Failed.'
+                type: string
+              reported:
+                description: Reported marks that the terminal phase was delivered
+                  to the control plane.
+                type: boolean
+            type: object
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}

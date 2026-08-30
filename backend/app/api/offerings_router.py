@@ -70,8 +70,7 @@ def _offering_view(o: Offering) -> dict:
         "mem_gb": o.mem_gb,
         "disk_gb": o.disk_gb,
         "credit_per_hour": str(o.credit_per_hour),
-        # Offering has no status column in the SSOT model; surface a stable default.
-        "status": getattr(o, "status", "active"),
+        "status": o.status,
         "min_cuda": o.min_cuda,
     }
 
@@ -107,8 +106,13 @@ async def list_offerings(
     principal: Principal = Depends(get_current_principal),
     db: AsyncSession = Depends(get_db),
 ):
-    """Catalog list. Authenticated-but-open read; no admin gate."""
+    """Catalog list. Authenticated-but-open read; no admin gate.
+
+    Retired (status=inactive) offerings are hidden from non-admins; administrators still see
+    them so they can reactivate or audit pricing."""
     base = select(Offering)
+    if principal.global_role not in ("super_admin", "org_admin"):
+        base = base.where(Offering.status != "inactive")
     if gpu_model is not None:
         base = base.where(Offering.gpu_model == gpu_model)
     if q is not None:

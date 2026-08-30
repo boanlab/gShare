@@ -1,27 +1,23 @@
 import { useTranslation } from 'react-i18next';
-import { SUPPORTED_LANGUAGES } from '@/i18n';
 
 /**
- * Language selector for the top bar. The choice is persisted per browser by the i18n detector,
- * so it survives a reload and is independent of the signed-in account.
+ * Language toggle for the top bar: one button that flips ko <-> en, styled like the
+ * mode-switch button next to it. The choice is persisted per browser by the i18n
+ * detector, so it survives a reload and is independent of the signed-in account.
  */
 export function LanguageToggle() {
   const { i18n, t } = useTranslation();
   const current = i18n.resolvedLanguage ?? 'en';
-
+  const next = current.startsWith('ko') ? 'en' : 'ko';
   return (
-    <select
-      className="h-[34px] rounded-lg border border-border bg-surface-2 px-2 text-[13px] font-semibold"
-      value={current}
-      onChange={(e) => void i18n.changeLanguage(e.target.value)}
+    <button
+      type="button"
+      className="h-[34px] rounded-ctl border border-border bg-surface-2 px-3 text-sm font-semibold hover:bg-surface"
+      onClick={() => void i18n.changeLanguage(next)}
       title={t('common.language')}
       aria-label={t('common.language')}
     >
-      {SUPPORTED_LANGUAGES.map((l) => (
-        <option key={l.code} value={l.code}>
-          {l.label}
-        </option>
-      ))}
-    </select>
+      {next === 'en' ? 'English' : '한국어'}
+    </button>
   );
 }

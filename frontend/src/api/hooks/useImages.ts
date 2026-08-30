@@ -16,7 +16,8 @@ export interface ImageFilter {
   kind?: 'image' | 'template' | 'iso';
   q?: string;
   tag?: string;
-  public?: boolean;            // true lists public images only, which is what the wizard shows
+  public?: boolean;            // true lists the shared catalog plus the caller's own private images
+  mine?: boolean;              // only the caller's own (built) images
   page?: number;
   size?: number;
 }
@@ -41,19 +42,34 @@ export interface ImportImageBody {
   source_type: 'registry' | 'url';
   source: string;
   name: string;
-  kind: 'image' | 'template' | 'iso';
+  kind: 'image' | 'template' | 'iso' | 'container';
   registry_auth?: { username?: string; password?: string; token?: string };
   tags?: Record<string, string>;
   cuda_version?: string;        // the image's CUDA version, e.g. '12.4'; empty means unspecified
 }
 
-// POST /images/import — pull from an external registry or URL; asynchronous, returns 202.
+// What /images/import answers with. `existing: true` means the reference was already registered —
+// by this caller earlier, or in the shared catalogue — and `id` is the row to use as-is.
+export interface ImportedImage {
+  id: string;
+  name: string;
+  kind: string;
+  registry: string;
+  import_status?: string | null;
+  public?: boolean;
+  owner_user_id?: string | null;
+  existing?: boolean;
+}
+
+// POST /images/import — register an external registry reference as catalog metadata; the pull
+// itself happens on the node when a session first uses the image. Admins register a shared entry;
+// everyone else gets a private row they own.
 export function useImportImage() {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: async (body: ImportImageBody) => {
       const { data } = await api.POST('/api/v1/images/import', { body });
-      return data;
+      return data as ImportedImage;
     },
     onSuccess: () => qc.invalidateQueries({ queryKey: imageKeys.all }),
   });

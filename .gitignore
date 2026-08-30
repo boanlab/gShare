@@ -64,7 +64,15 @@ test/e2e/frontend/package*.json
 
 # ── Cluster topology with real addresses; only the example is tracked. ──
 hack/cluster-info
+hack/storage-csi-key
+hack/storage-csi-key.pub
 
 # UX audit reports are a point-in-time artefact of a local run, not source.
 test/e2e/ux/out/
 test/e2e/ux/out-*/
+
+# ── Local assistant/agent tooling: workstation config, not project source. ──
+.claude/
+.agents/
+skills-lock.json
+CLAUDE.md

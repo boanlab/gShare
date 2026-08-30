@@ -20,6 +20,7 @@ dependencies = [
     "python-ulid>=2.7",                 # prefixed ULID id generator
     "kubernetes-asyncio>=31.1",         # CRD-primary GShareSession apply only (no workload K8s calls)
     "sse-starlette>=2.1",               # SSE for /sessions/{id}/events
+    "prometheus-client>=0.21",          # /metrics: request histograms, SSE/pool/queue gauges
 ]
 
 [project.optional-dependencies]

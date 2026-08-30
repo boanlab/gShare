@@ -40,6 +40,9 @@ operator:
   # The idle reaper reads utilisation from the stock HAMi vGPU monitor that cluster-bootstrap
   # installs, so no Prometheus is required.
   hamiMonitorUrl: "http://hami-device-plugin-monitor.kube-system.svc:31992"
+  # With a storage node (cluster-info STORAGE_NODE): the democratic-csi class that gives volumes a
+  # real quota and every access mode. Leave unset to stay on the cluster default (local-path).
+  # volumeStorageClass: gshare-data
   # Node agent for in-place yield and borrowing; a node that does not qualify falls back to cold.
   losslessAgentImage: docker.io/boanlab/gshare-lossless-agent:latest
   # The lend-guard ValidatingWebhook, so the borrow invariants are enforced at admission on a remote

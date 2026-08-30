@@ -1,0 +1,326 @@
+# GShare monitoring collection layer: the metric sources behind the admin monitoring page and the
+# idle reaper's workload-aware idle detection.
+#
+#   kubectl apply -f deploy/monitoring/monitoring-stack.yaml
+#
+# What runs:
+#   dcgm-exporter      DaemonSet on GPU nodes  -> DCGM_FI_DEV_* per physical card (UUID labelled)
+#   node-exporter      DaemonSet on every node -> host CPU / memory / disk / network
+#   kube-state-metrics Deployment              -> pod/node object state (restarts, phases)
+#   kubelet cAdvisor   scraped in-place        -> per-pod CPU / memory / net / disk
+#   HAMi vGPU monitor  scraped in-place        -> hami_host_gpu_* (already running in kube-system)
+#   prometheus         Deployment + PVC        -> 30d retention on gshare-data
+#
+# Prometheus is NOT exposed outside the cluster: the console reads metrics through gshare-api,
+# which whitelists the queries and enforces the super_admin gate. Node prerequisites for the GPU
+# exporter: nvidia runtimeClass + the node label gshare.io/gpu=true.
+apiVersion: v1
+kind: Namespace
+metadata: { name: monitoring }
+---
+# ── GPU: DCGM ──────────────────────────────────────────────────────────────────
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: dcgm-exporter
+  namespace: monitoring
+spec:
+  selector:
+    matchLabels: { app: dcgm-exporter }
+  template:
+    metadata:
+      labels: { app: dcgm-exporter }
+    spec:
+      runtimeClassName: nvidia
+      nodeSelector: { gshare.io/gpu: "true" }
+      tolerations:
+        - { operator: Exists }
+      containers:
+        - name: dcgm-exporter
+          image: nvcr.io/nvidia/k8s/dcgm-exporter:3.3.9-3.6.1-ubuntu22.04
+          env:
+            - { name: DCGM_EXPORTER_LISTEN, value: ":9400" }
+            # Map metrics to the pod holding the GPU where the driver reports it. Harmless when
+            # HAMi splits a card (the label is simply absent); the console never attributes a
+            # shared card's usage to one session.
+            - { name: DCGM_EXPORTER_KUBERNETES, value: "true" }
+          ports:
+            - { name: metrics, containerPort: 9400 }
+          securityContext:
+            capabilities: { add: ["SYS_ADMIN"] }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: dcgm-exporter
+  namespace: monitoring
+  labels: { app: dcgm-exporter }
+spec:
+  selector: { app: dcgm-exporter }
+  ports:
+    - { name: metrics, port: 9400, targetPort: 9400 }
+---
+# ── Host: node-exporter ────────────────────────────────────────────────────────
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: node-exporter
+  namespace: monitoring
+spec:
+  selector:
+    matchLabels: { app: node-exporter }
+  template:
+    metadata:
+      labels: { app: node-exporter }
+    spec:
+      hostNetwork: true
+      hostPID: true
+      tolerations:
+        - { operator: Exists }
+      containers:
+        - name: node-exporter
+          image: quay.io/prometheus/node-exporter:v1.8.2
+          args:
+            - "--path.procfs=/host/proc"
+            - "--path.sysfs=/host/sys"
+            - "--path.rootfs=/host/root"
+            - "--collector.filesystem.mount-points-exclude=^/(dev|proc|sys|var/lib/docker/.+|var/lib/kubelet/.+)($|/)"
+          ports:
+            - { name: metrics, containerPort: 9100, hostPort: 9100 }
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 65534
+          volumeMounts:
+            - { name: proc, mountPath: /host/proc, readOnly: true }
+            - { name: sys, mountPath: /host/sys, readOnly: true }
+            - { name: root, mountPath: /host/root, readOnly: true, mountPropagation: HostToContainer }
+      volumes:
+        - { name: proc, hostPath: { path: /proc } }
+        - { name: sys, hostPath: { path: /sys } }
+        - { name: root, hostPath: { path: / } }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: node-exporter
+  namespace: monitoring
+  labels: { app: node-exporter }
+spec:
+  selector: { app: node-exporter }
+  ports:
+    - { name: metrics, port: 9100, targetPort: 9100 }
+---
+# ── Object state: kube-state-metrics ───────────────────────────────────────────
+apiVersion: v1
+kind: ServiceAccount
+metadata: { name: kube-state-metrics, namespace: monitoring }
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata: { name: kube-state-metrics }
+rules:
+  - apiGroups: [""]
+    resources: ["nodes", "pods", "services", "namespaces", "persistentvolumeclaims", "persistentvolumes", "resourcequotas", "replicationcontrollers", "endpoints", "secrets", "configmaps", "limitranges"]
+    verbs: ["list", "watch"]
+  - apiGroups: ["apps"]
+    resources: ["deployments", "daemonsets", "statefulsets", "replicasets"]
+    verbs: ["list", "watch"]
+  - apiGroups: ["batch"]
+    resources: ["jobs", "cronjobs"]
+    verbs: ["list", "watch"]
+  - apiGroups: ["storage.k8s.io"]
+    resources: ["storageclasses", "volumeattachments"]
+    verbs: ["list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata: { name: kube-state-metrics }
+roleRef: { apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: kube-state-metrics }
+subjects:
+  - { kind: ServiceAccount, name: kube-state-metrics, namespace: monitoring }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata: { name: kube-state-metrics, namespace: monitoring }
+spec:
+  replicas: 1
+  selector: { matchLabels: { app: kube-state-metrics } }
+  template:
+    metadata: { labels: { app: kube-state-metrics } }
+    spec:
+      serviceAccountName: kube-state-metrics
+      containers:
+        - name: kube-state-metrics
+          image: registry.k8s.io/kube-state-metrics/kube-state-metrics:v2.13.0
+          ports:
+            - { name: metrics, containerPort: 8080 }
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 65534
+            allowPrivilegeEscalation: false
+            capabilities: { drop: ["ALL"] }
+            seccompProfile: { type: RuntimeDefault }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: kube-state-metrics
+  namespace: monitoring
+  labels: { app: kube-state-metrics }
+spec:
+  selector: { app: kube-state-metrics }
+  ports:
+    - { name: metrics, port: 8080, targetPort: 8080 }
+---
+# ── Prometheus ─────────────────────────────────────────────────────────────────
+apiVersion: v1
+kind: ServiceAccount
+metadata: { name: prometheus, namespace: monitoring }
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata: { name: prometheus-monitoring }
+rules:
+  - apiGroups: [""]
+    resources: ["endpoints", "pods", "services", "nodes", "nodes/metrics", "nodes/proxy"]
+    verbs: ["get", "list", "watch"]
+  - nonResourceURLs: ["/metrics", "/metrics/cadvisor"]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata: { name: prometheus-monitoring }
+roleRef: { apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: prometheus-monitoring }
+subjects:
+  - { kind: ServiceAccount, name: prometheus, namespace: monitoring }
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata: { name: prometheus-data, namespace: monitoring }
+spec:
+  accessModes: ["ReadWriteOnce"]
+  storageClassName: gshare-data
+  resources:
+    requests: { storage: 20Gi }
+---
+apiVersion: v1
+kind: ConfigMap
+metadata: { name: prometheus-config, namespace: monitoring }
+data:
+  prometheus.yml: |
+    global:
+      scrape_interval: 15s
+      evaluation_interval: 15s
+    scrape_configs:
+      # GPU cards (DCGM), host (node-exporter) and object state (kube-state-metrics) all live in
+      # the monitoring namespace and are picked up by their service label.
+      - job_name: dcgm
+        kubernetes_sd_configs:
+          - role: endpoints
+            namespaces: { names: [monitoring] }
+        relabel_configs:
+          - source_labels: [__meta_kubernetes_service_label_app]
+            regex: dcgm-exporter
+            action: keep
+          - source_labels: [__meta_kubernetes_endpoint_node_name]
+            target_label: node
+
+      - job_name: node
+        kubernetes_sd_configs:
+          - role: endpoints
+            namespaces: { names: [monitoring] }
+        relabel_configs:
+          - source_labels: [__meta_kubernetes_service_label_app]
+            regex: node-exporter
+            action: keep
+          - source_labels: [__meta_kubernetes_endpoint_node_name]
+            target_label: node
+
+      - job_name: kube-state-metrics
+        kubernetes_sd_configs:
+          - role: endpoints
+            namespaces: { names: [monitoring] }
+        relabel_configs:
+          - source_labels: [__meta_kubernetes_service_label_app]
+            regex: kube-state-metrics
+            action: keep
+
+      # Per-pod CPU/memory/net/disk, straight from the kubelet's built-in cAdvisor.
+      - job_name: kubelet-cadvisor
+        scheme: https
+        tls_config: { ca_file: /var/run/secrets/kubernetes.io/serviceaccount/ca.crt, insecure_skip_verify: true }
+        bearer_token_file: /var/run/secrets/kubernetes.io/serviceaccount/token
+        kubernetes_sd_configs: [{ role: node }]
+        relabel_configs:
+          - action: labelmap
+            regex: __meta_kubernetes_node_label_(.+)
+          - target_label: __address__
+            replacement: kubernetes.default.svc:443
+          - source_labels: [__meta_kubernetes_node_name]
+            regex: (.+)
+            target_label: __metrics_path__
+            replacement: /api/v1/nodes/$1/proxy/metrics/cadvisor
+          - source_labels: [__meta_kubernetes_node_name]
+            target_label: node
+
+      # HAMi's own vGPU monitor: the only source that knows about vGPU splitting.
+      - job_name: hami
+        kubernetes_sd_configs:
+          - role: pod
+            namespaces: { names: [kube-system] }
+        relabel_configs:
+          - source_labels: [__meta_kubernetes_pod_label_app_kubernetes_io_component]
+            regex: hami-device-plugin
+            action: keep
+          - source_labels: [__meta_kubernetes_pod_container_port_number]
+            regex: "9394"
+            action: keep
+          - source_labels: [__meta_kubernetes_pod_node_name]
+            target_label: node
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata: { name: prometheus, namespace: monitoring }
+spec:
+  replicas: 1
+  strategy: { type: Recreate }        # single writer: the PVC is RWO
+  selector: { matchLabels: { app: prometheus } }
+  template:
+    metadata: { labels: { app: prometheus } }
+    spec:
+      serviceAccountName: prometheus
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65534
+        fsGroup: 65534
+      containers:
+        - name: prometheus
+          image: prom/prometheus:v2.54.1
+          args:
+            - "--config.file=/etc/prometheus/prometheus.yml"
+            - "--storage.tsdb.path=/prometheus"
+            - "--storage.tsdb.retention.time=30d"
+            - "--web.enable-lifecycle"
+          ports: [{ containerPort: 9090 }]
+          readinessProbe:
+            httpGet: { path: /-/ready, port: 9090 }
+            initialDelaySeconds: 10
+          resources:
+            requests: { cpu: 100m, memory: 512Mi }
+            limits: { cpu: "2", memory: 4Gi }
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: { drop: ["ALL"] }
+          volumeMounts:
+            - { name: config, mountPath: /etc/prometheus }
+            - { name: data, mountPath: /prometheus }
+      volumes:
+        - { name: config, configMap: { name: prometheus-config } }
+        - { name: data, persistentVolumeClaim: { claimName: prometheus-data } }
+---
+apiVersion: v1
+kind: Service
+metadata: { name: prometheus, namespace: monitoring }
+spec:
+  selector: { app: prometheus }
+  ports: [{ port: 9090, targetPort: 9090 }]

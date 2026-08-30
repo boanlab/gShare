@@ -1,6 +1,6 @@
 import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { api, idemKey } from '@/api/client';
-import { sessionKeys } from './useSessions';
+import { invalidateSessionAdjacent } from './useSessions';
 import type { components } from '@/api/schema';
 import type { CreateSessionBody } from '@/api/types';
 
@@ -18,7 +18,7 @@ export function useCreateSession() {
       });
       return data;
     },
-    onSuccess: () => qc.invalidateQueries({ queryKey: sessionKeys.all }),
+    onSuccess: () => invalidateSessionAdjacent(qc),
   });
 }
 

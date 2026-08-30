@@ -14,11 +14,18 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.cluster.sse_bus import publish_session_event
 from app.core.config import settings
-from app.core.errors import InvalidStateTransition, NoCapacity, NotFound  # noqa: F401
+from app.core.errors import (  # noqa: F401
+    InsufficientCredit,
+    InvalidStateTransition,
+    NoCapacity,
+    NotFound,
+)
 from app.core.logging import get_logger
-from app.db.models import Allocation, GpuDevice, Session
+from app.db.models import Allocation, CreditWallet, GpuDevice, Session
 from app.domain.credit_engine import CreditEngine
 from app.domain.notification_service import NotificationService
+from app.domain.pool import maybe_apply_drained_mode
+from app.domain.session_events import record_session_event
 
 log = get_logger(__name__)
 
@@ -35,7 +42,9 @@ ALLOWED_TRANSITIONS: dict[str, set[str]] = {
     "paused": {"running", "terminating", "error"},
     "terminating": {"terminated", "error"},
     "terminated": set(),
-    "error": set(),
+    # error is cleanable: terminate() deletes the orphaned CR/pod and settles any stranded hold
+    # (both idempotent), then marks the row terminated.
+    "error": {"terminating"},
 }
 
 
@@ -91,6 +100,30 @@ class SessionService:
                 )
             ) is not None
 
+            # Credit gate: a resume is a fresh admission point, so a session whose wallet cannot
+            # pay must not restart. Creation gates with a hold keyed hold:{ses}; that key is
+            # already spent by the time a session resumes (hold() would return idempotently), so
+            # solvency is checked explicitly here. Without it a credit-exhausted session could be
+            # resumed by hand and run free until the next grace window paused it again.
+            # The verdict is computed here but raised AFTER the transaction closes — raising
+            # inside begin() leaves the connection awaiting rollback.
+            short: tuple | None = None
+            if sess.credit_per_hour_snapshot and sess.billing_wallet_id:
+                from decimal import Decimal as _Dec
+
+                from app.domain.credit_engine import _occupancy as _occ
+                from app.domain.credit_engine import _round2 as _r2
+
+                w = await self.db.get(CreditWallet, sess.billing_wallet_id)
+                avail = (w.balance - w.reserved) if w is not None else _Dec("0")
+                # One minute of billing: the smallest unit the billing worker charges, so a
+                # session that cannot cover it would be paused again before doing any work.
+                need = _r2(_Dec(sess.credit_per_hour_snapshot) * _occ(sess) / _Dec("60"))
+                if avail < need:
+                    short = (avail, need)
+        if short is not None:
+            raise InsufficientCredit(available=short[0], need=short[1])
+
         sched = SchedulerService(self.db)
         req = sched._req_from_entry(None, sess)
         # A rollback inside reclaim or set_paused expires `sess`, so capture the scalars first.
@@ -112,6 +145,8 @@ class SessionService:
                 if reserved:
                     sess.status = "running"
                     sess.started_at = _now()
+                    sess.status_reason = None     # the pause's reason is history now
+                    sess.terminated_at = None     # a restarted session is not "ended"
             if not reserved:
                 # No capacity: stay paused, do not recreate the pod, and tell the caller with a 409.
                 raise NoCapacity(
@@ -125,22 +160,50 @@ class SessionService:
                 sess = await self.db.get(Session, session_id, with_for_update=True)
                 sess.status = "running"
                 sess.started_at = _now()
+                sess.status_reason = None
+                sess.terminated_at = None
+
+        # ── Resume re-snapshot: the CURRENT offering price applies from a resume onward ──
+        # A resume is a fresh admission point, so an admin's price fix reaches paused sessions
+        # without waiting for termination; running sessions keep their start-time rate. Spot
+        # sessions keep their discount, mirroring the creation-time snapshot rule.
+        if is_gpu:
+            from decimal import Decimal as _D
+
+            from app.core.config import settings as _settings
+
+            async with self.db.begin():
+                est = await sched._estimate(req)
+                fresh = await self.db.get(Session, session_id)
+                if fresh is not None and fresh.billing_wallet_id and est.credit_per_hour is not None:
+                    new_rate = _D(str(est.credit_per_hour))
+                    if getattr(fresh, "preemptible", False):
+                        new_rate = (new_rate * _D(str(_settings.SPOT_DISCOUNT))).quantize(_D("0.01"))
+                    if fresh.credit_per_hour_snapshot != new_rate:
+                        old_rate = fresh.credit_per_hour_snapshot
+                        fresh.credit_per_hour_snapshot = new_rate
+                        record_session_event(
+                            self.db, sid, "rate_resnapshot",
+                            message=f"{old_rate} -> {new_rate} C/h (resume)",
+                        )
 
         # Operator: cold recreates the pod and rebinds the GPU; yield toggles VRAM back, losslessly.
         await self.handoff.set_paused(sess, False)
         # Close the ambient transaction set_paused's read opened, so notify's begin() is clean.
         await self.db.rollback()
         async with self.db.begin():
+            record_session_event(self.db, sid, "resumed")
             await NotificationService(self.db).notify(
                 [owner_uid], "session_resumed", "Session resumed",
-                f"Session '{sname or sid}' resumed and re-acquired its GPU.", session_id=sid,
+                f"Session '{sname or sid}' resumed and re-acquired its GPU.",
+                params={"session_name": sname or sid}, session_id=sid,
             )
         await publish_session_event(sid, {"phase": "running", "status": "running"})
         # Clear any credit-exhaustion grace window on resume: top-up clears grace.
         await self._clear_grace(session_id)
         return sess
 
-    async def stop(self, session_id: str):
+    async def stop(self, session_id: str, *, reason: str = "user_stopped"):
         """Pause: return the GPU and stop billing. running -> paused.
 
         The operator is given spec.paused=true, tears the pod down, and returns the physical GPU —
@@ -150,6 +213,11 @@ class SessionService:
         """
         now = _now()
         sess = await self._get(session_id)
+        # A session that has not started yet has no pod to pause and no billing to stop — "stop"
+        # from the user's point of view is a cancel, so delegate to terminate (which releases the
+        # reservation and settles the hold) instead of answering 409.
+        if sess.status in ("pending", "preparing"):
+            return await self.terminate(session_id, reason=reason)
         self._assert_transition(sess.status, "paused")
         # Yield mode: the operator keeps the pod and evicts VRAM, so a live pod still holds the card
         # and the allocation stays — resume toggles back without re-reserving. Capture before the
@@ -169,10 +237,27 @@ class SessionService:
             await self._set_resident_device_lend_state(session_id, "yielded")
         sess = await self._get(session_id)
         sess.status = "paused"
+        sess.status_reason = reason
         await self.db.flush()
+        _paused_titles = {
+            "credit_exhausted": ("Session paused: out of credits",
+                                 f"Session '{sess.name or sess.id}' was paused because its credits ran out. "
+                                 "Top up and resume to continue; your work is preserved."),
+            "idle": ("Session paused: idle GPU reclaimed",
+                     f"Session '{sess.name or sess.id}' was paused after its GPU sat idle. "
+                     "Resume any time to re-acquire a GPU."),
+            "admin_stopped": ("Session paused by an administrator",
+                              f"Session '{sess.name or sess.id}' was paused by an administrator."),
+        }
+        n_title, n_body = _paused_titles.get(reason, (
+            "Session paused",
+            f"Session '{sess.name or sess.id}' paused: GPU returned, billing stopped.",
+        ))
+        record_session_event(self.db, sess.id, "paused", reason=reason)
         await NotificationService(self.db).notify(
-            [sess.owner_user_id], "session_paused", "Session paused",
-            f"Session '{sess.name or sess.id}' paused: GPU returned, billing stopped.", session_id=sess.id,
+            [sess.owner_user_id], "session_paused", n_title, n_body,
+            params={"session_name": sess.name or sess.id, "reason": reason},
+            session_id=sess.id, reason=reason,
         )
         await publish_session_event(sess.id, {"phase": "paused", "status": "paused"})
         await self.db.commit()
@@ -258,7 +343,7 @@ class SessionService:
             return await self.start(session_id)
         return sess
 
-    async def terminate(self, session_id: str, *, forced: bool = False):
+    async def terminate(self, session_id: str, *, forced: bool = False, reason: str = "user_stopped"):
         """Terminate + settle. Also invoked by operator idle-reaper -> terminated->settle.
 
         running/paused -> terminating -> terminated. settle finalizes remaining consume, releases
@@ -274,8 +359,12 @@ class SessionService:
             return sess
         # running/paused -> terminating (skip if already terminating).
         if sess.status != "terminating":
+            was_error = sess.status == "error"
             self._assert_transition(sess.status, "terminating")
             sess.status = "terminating"
+            if not was_error or sess.status_reason is None:
+                # cleaning up an error wreck keeps its original reason (quota_exceeded, ...)
+                sess.status_reason = reason
         await self.db.commit()             # publish the claim and drop the lock; concurrent callers see `terminating` and proceed idempotently
         sess = await self._get(session_id)  # reload so attributes are accessible after the commit
         # Reclaim GPU capacity (idempotent — released rows are skipped).
@@ -288,12 +377,17 @@ class SessionService:
         sess = await self._get(session_id)
         sess.status = "terminated"
         sess.terminated_at = now
+        if sess.status_reason is None:
+            sess.status_reason = reason
         await self.db.flush()
         # Notify the owner. The operator callback _on_terminated is guarded by was_terminal, so this
         # cannot fire twice.
+        record_session_event(self.db, sess.id, "terminated", reason=sess.status_reason)
         await NotificationService(self.db).notify(
             [sess.owner_user_id], "session_terminated", "Session terminated",
-            f"Session '{sess.name or sess.id}' has been terminated.", session_id=sess.id,
+            f"Session '{sess.name or sess.id}' has been terminated.",
+            params={"session_name": sess.name or sess.id, "reason": sess.status_reason},
+            session_id=sess.id,
         )
         await publish_session_event(sess.id, {"phase": "terminated", "status": "terminated"})
         await self.db.commit()
@@ -366,6 +460,7 @@ A spot allocation (kind='spot') never added to device.used_*, so nothing is subt
                 else:
                     dev.used_mem_mb = max(0, dev.used_mem_mb - (alloc.gpu_mem_mb or 0))
                     dev.used_cores = max(0, dev.used_cores - (alloc.gpu_cores or 0))
+                maybe_apply_drained_mode(dev)
         alloc.status = "released"
         alloc.ended_at = now
         await self.db.flush()

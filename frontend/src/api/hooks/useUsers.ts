@@ -5,7 +5,7 @@ import { api } from '@/api/client';
 // Uses the loose accessor so the response envelopes can be typed locally.
 const raw = api as unknown as {
   GET: (path: string, init?: { params?: { query?: Record<string, unknown>; path?: Record<string, string> } }) => Promise<{ data?: unknown }>;
-  POST: (path: string, init?: { body?: unknown; params?: { path?: Record<string, string> } }) => Promise<{ data?: unknown }>;
+  POST: (path: string, init?: { body?: unknown; headers?: Record<string, string>; params?: { path?: Record<string, string> } }) => Promise<{ data?: unknown; error?: unknown }>;
   PATCH: (path: string, init?: { body?: unknown; params?: { path?: Record<string, string> } }) => Promise<{ data?: unknown }>;
   PUT: (path: string, init?: { body?: unknown; params?: { path?: Record<string, string> } }) => Promise<{ data?: unknown }>;
   DELETE: (path: string, init?: { params?: { path?: Record<string, string>; query?: Record<string, unknown> } }) => Promise<{ data?: unknown }>;
@@ -44,6 +44,7 @@ export interface UserListFilter {
   q?: string;
   status?: UserStatus | '';
   org_id?: string;
+  group_id?: string;
   page?: number;
   size?: number;
 }
@@ -74,22 +75,72 @@ export function useUser(id?: string) {
   });
 }
 
-// GET /users — paginated, filterable by q, status, and org_id.
-export function useUsers(filter: UserListFilter = {}) {
+export interface UsersPage {
+  data: AdminUser[];
+  pagination: { page: number; size: number; total: number };
+}
+
+// GET /users — paginated, filterable by q, status, and org_id; the full envelope, so list
+// screens can page server-side (2000 students never fit in one response).
+export function useUsersPage(filter: UserListFilter = {}) {
   const query: Record<string, unknown> = { page: filter.page ?? 1, size: filter.size ?? 50 };
   if (filter.q) query.q = filter.q;
   if (filter.status) query.status = filter.status;
   if (filter.org_id) query.org_id = filter.org_id;
+  if (filter.group_id) query.group_id = filter.group_id;
   return useQuery({
     queryKey: userKeys.list(filter),
     queryFn: async () => {
       const { data } = await raw.GET('/api/v1/users', { params: { query } });
-      return (data as { data?: AdminUser[] } | undefined)?.data ?? [];
+      const page = (data ?? {}) as Partial<UsersPage>;
+      return {
+        data: page.data ?? [],
+        pagination: page.pagination ?? { page: filter.page ?? 1, size: filter.size ?? 50, total: page.data?.length ?? 0 },
+      } as UsersPage;
     },
   });
 }
 
-// POST /users — create a user, which triggers the invitation email.
+// Data-only convenience for pickers (bounded by `size`; use useUsersPage for list screens).
+export function useUsers(filter: UserListFilter = {}) {
+  const query = useUsersPage(filter);
+  return { ...query, data: query.data?.data };
+}
+
+export interface BulkUserRow { email: string; name: string }
+export interface BulkCreateBody { group_id: string; initial_role?: string; rows: BulkUserRow[] }
+export interface BulkRowResult {
+  row: number;
+  email: string;
+  status: 'created' | 'exists' | 'invalid';
+  user_id?: string;
+  initial_password?: string;
+  code?: string;
+}
+export interface BulkCreateResponse {
+  results: BulkRowResult[];
+  summary: { requested: number; created: number; exists: number; invalid: number };
+}
+
+// POST /users/bulk — roster import: up to 200 rows per call, partial success by design.
+// Initial passwords come back exactly once in the response (the import screen turns them into a
+// downloadable credentials CSV). Idempotent per batch on the Idempotency-Key.
+export function useBulkCreateUsers() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: async ({ body, idem }: { body: BulkCreateBody; idem: string }) => {
+      const { data, error } = await raw.POST('/api/v1/users/bulk', {
+        body,
+        headers: { 'Idempotency-Key': idem },
+      });
+      if (error) throw error;
+      return data as unknown as BulkCreateResponse;
+    },
+    onSuccess: () => qc.invalidateQueries({ queryKey: userKeys.all }),
+  });
+}
+
+// POST /users — create a user (admin-set initial password; changed at first login).
 export function useCreateUser() {
   const qc = useQueryClient();
   return useMutation({
@@ -159,5 +210,25 @@ export function useSetGlobalRole() {
       return data as AdminUser;
     },
     onSuccess: () => qc.invalidateQueries({ queryKey: userKeys.all }),
+  });
+}
+
+// GET /users/{id}/usage — live resource footprint for the admin drawer.
+export interface UserUsage {
+  sessions: { active: number; running: number; paused: number; queued: number };
+  host: { cpu: number; mem_gb: number };
+  gpu: { allocations: number; gpu_mem_mb: number; gpu_cores: number };
+  volumes: { count: number; quota_gb: number; used_gb: number };
+  wallet: { balance: number; reserved: number };
+}
+
+export function useUserUsage(id?: string) {
+  return useQuery({
+    queryKey: ['user', id ?? '', 'usage'],
+    enabled: !!id,
+    queryFn: async () => {
+      const { data } = await raw.GET('/api/v1/users/{user_id}/usage', { params: { path: { user_id: id as string } } });
+      return data as UserUsage;
+    },
   });
 }

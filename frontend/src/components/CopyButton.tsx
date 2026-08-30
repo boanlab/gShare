@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
+import { Check, Copy, Warning } from './icons';
 
 /** Clipboard copy with visible confirmation. */
 export function CopyButton({ value, label, className = '' }: { value: string; label?: string; className?: string }) {
@@ -40,8 +41,10 @@ export function CopyButton({ value, label, className = '' }: { value: string; la
       aria-label={name}
       className={`gs-btn gs-btn-sm ${copied ? 'text-free border-free' : ''} ${state === 'failed' ? 'text-danger border-danger' : ''} ${className}`}
     >
-      <span aria-hidden="true">{copied ? '✓' : state === 'failed' ? '!' : '⧉'}</span>
-      <span role="status" className={state === 'idle' ? 'gs-sr-only' : 'text-[11px] font-bold'}>
+      {copied ? <Check size={14} aria-hidden="true" /> : state === 'failed'
+        ? <Warning size={14} aria-hidden="true" />
+        : <Copy size={14} aria-hidden="true" />}
+      <span role="status" className={state === 'idle' ? 'gs-sr-only' : 'text-2xs font-bold'}>
         {state === 'copied' ? t('common.copied') : state === 'failed' ? t('common.copyFailed') : ''}
       </span>
     </button>
@@ -53,7 +56,7 @@ export function CopyableId({ value, className = '' }: { value: string; className
   if (!value) return <span className="text-muted">-</span>;
   return (
     <span className={`inline-flex items-center gap-1 max-w-full ${className}`}>
-      <code className="font-mono text-[12px] truncate" title={value}>{value}</code>
+      <code className="font-mono text-xs truncate" title={value}>{value}</code>
       <CopyButton value={value} />
     </span>
   );

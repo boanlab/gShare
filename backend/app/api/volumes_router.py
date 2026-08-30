@@ -13,31 +13,31 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import Pagination, get_current_principal
-from app.api.schemas.volume import PermissionBody, QuotaRequestBody, VolumeCreate, VolumeRead
+from app.api.schemas.volume import PermissionBody, VolumeCreate, VolumePatch, VolumeRead
 from app.auth.rbac import Principal, rbac_allows
 from app.core import ids
-from app.core.config import settings
 from app.core.errors import (
+    AlreadyExists,
     DomainError,
     Forbidden,
     InvalidStateTransition,
     NotFound,
+    NotImplementedFeature,
     QuotaExceeded,
 )
 from app.db.base import get_db
 from app.db.models import (
-    ResourcePolicy,
+    GpuNode,
+    Project,
     Session,
     StorageFolder,
     StorageVolume,
     User,
     VolumeMount,
     VolumePermission,
-    VolumeQuotaRequest,
     VolumeSnapshot,
 )
 from app.domain.audit_service import AuditService
-from app.domain.notification_service import NotificationService
 
 router = APIRouter(prefix="/storage/volumes", tags=["volumes"])
 
@@ -86,18 +86,23 @@ async def _active_mount_session_ids(db: AsyncSession, volume_id: str) -> list[st
 async def _storage_usage(
     db: AsyncSession, scope: str, scope_id: str, exclude_volume_id: str | None = None,
 ) -> tuple[int | None, int]:
-    """Return (limit_gb, allocated_gb) from ResourcePolicy.limits.storage_gb for the exact scope.
+    """Return (limit_gb, allocated_gb) from the effective ResourcePolicy.limits.volume_gb.
 
     The limit is None (unlimited) when there is no policy or it is 0. allocated is the sum of the
     volume quotas in the same (scope, scope_id)."""
-    pol = (
-        await db.scalars(
-            select(ResourcePolicy).where(
-                ResourcePolicy.scope == scope, ResourcePolicy.scope_id == scope_id
-            )
-        )
-    ).first()
-    raw_limit = (pol.limits or {}).get("storage_gb") if pol is not None else None
+    # The limit comes from the per-field EFFECTIVE merge (user -> group -> org -> global),
+    # exactly like session admission. An exact-scope row lookup silently read "no user row"
+    # as unlimited and let a 100,000 GiB volume sail past a 1,000 GiB global policy.
+    from app.domain.policy import resolve_effective_policy
+
+    eff = await resolve_effective_policy(
+        db,
+        scope_id if scope == "user" else None,
+        scope_id if scope == "group" else None,
+    )
+    # volume_gb governs VOLUMES; storage_gb stays the session scratch-disk sum — two different
+    # pools of storage, governed separately.
+    raw_limit = (eff.limits or {}).get("volume_gb") if eff is not None else None
     limit = int(raw_limit) if raw_limit else None   # None or 0 means unlimited
     q = select(func.coalesce(func.sum(StorageVolume.quota_gb), 0)).where(
         StorageVolume.scope == scope,
@@ -110,15 +115,62 @@ async def _storage_usage(
     return limit, allocated
 
 
+class VolumeMounted(DomainError):
+    """Deletion refused: an ACTIVE session still mounts this volume (409, own code so the
+    console can say WHY instead of a generic invalid-state message)."""
+    code, http = "volume_mounted", 409
+
+
+class StorageCapacityExceeded(DomainError):
+    """The storage pool physically cannot back this much provisioned quota (409)."""
+    code, http = "storage_capacity_exceeded", 409
+
+
+async def _physical_storage(db: AsyncSession) -> tuple[int | None, int]:
+    """(capacity_gb, allocated_gb) of the volume-backing storage pool.
+
+    Capacity is the storage-role nodes' host disk (operator inventory) with a 5% safety margin —
+    ZFS/CSI need working space and a 100%-provisioned pool ends in ENOSPC for everyone. Allocation
+    is the provisioned quota of every live volume. None = no storage node reported (no gate)."""
+    cap = await db.scalar(
+        select(func.coalesce(func.sum(GpuNode.disk), 0)).where(GpuNode.role == "storage")
+    )
+    if not cap:
+        return None, 0
+    allocated = int(await db.scalar(
+        select(func.coalesce(func.sum(StorageVolume.quota_gb), 0)).where(StorageVolume.deleted_at.is_(None))
+    ) or 0)
+    return int(int(cap) * 0.95), allocated
+
+
 async def _assert_storage_quota(
     db: AsyncSession, scope: str, scope_id: str, target_quota_gb: int,
     exclude_volume_id: str | None = None,
 ) -> None:
-    """Enforce the per-scope total storage limit from ResourcePolicy.limits.storage_gb.
+    """Enforce the per-scope total volume limit from ResourcePolicy.limits.volume_gb.
 
     When the other volumes in the same (scope, scope_id) — this one excluded — plus the new or
     target quota exceed the limit, respond 409 quota_exceeded. No policy, or no storage_gb, means
     unlimited."""
+    # PHYSICS FIRST: the pool's real capacity binds every scope, an unlimited policy included —
+    # this must run before the policy early-return, or a no-policy scope skips it entirely
+    # (which is exactly how a 100,000 GiB volume slipped past a 2 TB pool).
+    cap, pool_alloc = await _physical_storage(db)
+    if cap is not None:
+        exclude = 0
+        if exclude_volume_id:
+            exclude = int(await db.scalar(
+                select(func.coalesce(func.sum(StorageVolume.quota_gb), 0)).where(
+                    StorageVolume.id == exclude_volume_id, StorageVolume.deleted_at.is_(None)
+                )
+            ) or 0)
+        if (pool_alloc - exclude) + int(target_quota_gb) > cap:
+            raise StorageCapacityExceeded(
+                "requested capacity exceeds the storage pool's physical capacity",
+                {"target_quota_gb": int(target_quota_gb), "capacity_gb": cap,
+                 "allocated_gb": pool_alloc - exclude},
+            )
+
     limit, allocated = await _storage_usage(db, scope, scope_id, exclude_volume_id)
     if limit is None:   # unlimited
         return
@@ -138,11 +190,20 @@ async def list_volumes(
     scope_id: str | None = Query(default=None),
     type: str | None = Query(default=None),
     access_mode: str | None = Query(default=None),
+    all_scopes: bool = Query(default=False, alias="all"),
     page: Pagination = Depends(Pagination),
     principal: Principal = Depends(get_current_principal),
     db: AsyncSession = Depends(get_db),
 ):
-    """List volumes with scope/type/access_mode filters + pagination."""
+    """List volumes with scope/type/access_mode filters + pagination.
+
+    Default view is the caller's own world for every role — the user console must show a
+    super_admin their volumes, not everyone's. `?all=true` (super_admin only) lists the fleet
+    for the admin volume page."""
+    # Direct (non-FastAPI) callers hand us the Query default object — coerce to a real bool.
+    all_scopes = all_scopes is True
+    if all_scopes and "super_admin" not in principal.global_roles:
+        raise Forbidden("fleet volume listing requires super_admin")
     stmt = select(StorageVolume).where(StorageVolume.deleted_at.is_(None))
     if scope is not None:
         stmt = stmt.where(StorageVolume.scope == scope)
@@ -155,15 +216,14 @@ async def list_volumes(
     # Tenant boundary: outside super_admin, a caller sees only volumes they own (user scope),
     # volumes of a group they administer (group scope, group_admin and above), and volumes they hold
     # an explicit VolumePermission on — the same rule as _assert_volume_access.
-    if "super_admin" not in principal.global_roles:
-        admin_group_ids = [
-            gid for gid, role in principal.memberships.items()
-            if role in ("group_admin", "org_admin")
-        ]
+    if not all_scopes:
+        member_group_ids = list(principal.memberships.keys())
         visible = or_(
             and_(StorageVolume.scope == "user", StorageVolume.scope_id == principal.user_id),
-            and_(StorageVolume.scope == "group", StorageVolume.scope_id.in_(admin_group_ids))
-            if admin_group_ids else False,
+            # A group volume is visible to every member of that group (mounting follows the
+            # same rule; managing it stays with group_admin and above).
+            and_(StorageVolume.scope == "group", StorageVolume.scope_id.in_(member_group_ids))
+            if member_group_ids else False,
             StorageVolume.id.in_(
                 select(VolumePermission.volume_id).where(
                     VolumePermission.user_id == principal.user_id
@@ -185,7 +245,42 @@ async def list_volumes(
             )
         )).all()
     )
-    return [VolumeRead.model_validate(v).model_copy(update={"role": roles.get(v.id)}) for v in vols]
+    # How many OTHER users each volume is shared with — the list shows a "shared" tag on > 0.
+    shared_counts = dict(
+        (await db.execute(
+            select(VolumePermission.volume_id, func.count()).where(
+                VolumePermission.volume_id.in_([v.id for v in vols]),
+                VolumePermission.role != "owner",
+            ).group_by(VolumePermission.volume_id)
+        )).all()
+    )
+    def _owner_key(v: StorageVolume) -> str | None:
+        # Rows created before owner_id existed fall back to the personal scope's user.
+        return v.owner_id or (v.scope_id if v.scope == "user" else None)
+
+    owner_ids = {k for v in vols if (k := _owner_key(v))}
+    owner_names = dict(
+        (await db.execute(select(User.id, User.name).where(User.id.in_(owner_ids)))).all()
+    ) if owner_ids else {}
+    # A group volume's owner is the GROUP: resolve grp_* ids to the department's name so the
+    # admin list shows "소프트웨어학과", not a raw ULID.
+    group_owner_ids = {v.scope_id for v in vols if v.scope == "group" and v.scope_id}
+    if group_owner_ids:
+        gnames = dict(
+            (await db.execute(select(Project.id, Project.name).where(Project.id.in_(group_owner_ids)))).all()
+        )
+        owner_names.update(gnames)
+    return [
+        VolumeRead.model_validate(v).model_copy(
+            update={
+                "role": roles.get(v.id) or _implicit_group_role(principal, v),
+                "owner_id": _owner_key(v),
+                "owner_name": owner_names.get(_owner_key(v)),
+                "shared_count": int(shared_counts.get(v.id, 0)),
+            }
+        )
+        for v in vols
+    ]
 
 
 @router.get("/quota-usage")
@@ -200,14 +295,31 @@ async def storage_quota_usage(
     Reads the same (scope, scope_id) policy and volume quota sum that _assert_storage_quota uses at
     creation time. has_limit=false means unlimited: no policy, or a limit of 0."""
     limit, allocated = await _storage_usage(db, scope, scope_id)
+    cap, pool_alloc = await _physical_storage(db)
+    physical = {"physical_remaining_gb": max(0, cap - pool_alloc)} if cap is not None else {}
     if limit is None:
-        return {"has_limit": False, "allocated_gb": allocated}
+        return {"has_limit": False, "allocated_gb": allocated, **physical}
     return {
         "has_limit": True,
         "limit_gb": limit,
         "allocated_gb": allocated,
         "remaining_gb": max(0, limit - allocated),
+        **physical,
     }
+
+
+def _implicit_group_role(principal: Principal, vol: StorageVolume) -> str | None:
+    """The role a group member holds on a group volume with no explicit permission row.
+
+    group_admin+ manage it (owner); members get rw on an RWX volume and ro on a ROX one."""
+    if vol.scope != "group":
+        return None
+    m_role = principal.memberships.get(vol.scope_id)
+    if m_role in ("group_admin", "org_admin"):
+        return "owner"
+    if m_role is not None:
+        return "rw" if vol.access_mode == "RWX" else "ro"
+    return None
 
 
 def _assert_can_manage_volume(principal: Principal, scope: str, scope_id: str) -> None:
@@ -230,19 +342,22 @@ def _assert_can_manage_volume(principal: Principal, scope: str, scope_id: str) -
     raise Forbidden("not permitted: only that group's administrators can manage a group volume")
 
 
+
 async def _assert_volume_access(db: AsyncSession, principal: Principal, vol: StorageVolume) -> None:
     """Authorize reading a volume or snapshotting it — owner, grantee, or administrator.
 
     - super_admin: everything.
     - user scope: the owner.
-    - group scope: group_admin and above for that group.
+    - group scope: every member of the group. A group volume is shared with the whole group by
+      construction (write access depends on access_mode; see the mount rules) — only creating,
+      resizing, and deleting stay with group_admin and above (_assert_can_manage_volume).
     - Otherwise: anyone holding an explicit VolumePermission (owner, rw, or ro).
     """
     if "super_admin" in principal.global_roles:
         return
     if vol.scope == "user" and vol.scope_id == principal.user_id:
         return
-    if vol.scope == "group" and principal.memberships.get(vol.scope_id) in ("group_admin", "org_admin"):
+    if vol.scope == "group" and vol.scope_id in principal.memberships:
         return
     role = await db.scalar(
         select(VolumePermission.role).where(
@@ -253,14 +368,6 @@ async def _assert_volume_access(db: AsyncSession, principal: Principal, vol: Sto
     if role is not None:
         return
     raise Forbidden("not permitted: you have no access to this volume")
-
-
-@router.get("/pricing")
-async def volume_pricing(principal: Principal = Depends(get_current_principal)):
-    """The storage rate in credits per GB-hour. The new-volume form multiplies it by quota_gb to
-    show the estimated hourly and monthly cost. 0 disables storage billing. This is
-    STORAGE_CREDIT_PER_GB_HOUR, the same rate the storage_billing worker charges."""
-    return {"credit_per_gb_hour": float(settings.STORAGE_CREDIT_PER_GB_HOUR)}
 
 
 @router.post("", status_code=status.HTTP_201_CREATED, response_model=VolumeRead)
@@ -304,7 +411,10 @@ async def create_volume(
     except IntegrityError:
         # UNIQUE(scope,scope_id,type) collision -> already provisioned.
         await db.rollback()
-        raise QuotaExceeded("volume already exists for scope/type") from None
+        raise AlreadyExists(
+            "a volume with this name already exists for the scope and type",
+            {"scope": body.scope, "type": body.type, "name": body.name},
+        ) from None
     await db.refresh(vol)
     return vol
 
@@ -324,30 +434,61 @@ async def get_volume(
             VolumePermission.user_id == principal.user_id,
         )
     )
-    return VolumeRead.model_validate(vol).model_copy(update={"role": role})
+    owner_key = vol.owner_id or (vol.scope_id if vol.scope == "user" else None)
+    owner_name = await db.scalar(select(User.name).where(User.id == owner_key)) if owner_key else None
+    # WHO mounts it right now — the same active-set rule the delete guard uses, so the panel
+    # doubles as the explanation for a volume_mounted refusal.
+    mounts = (await db.execute(
+        select(VolumeMount.mount_path, VolumeMount.mode, Session.id, Session.name,
+               Session.status, Session.owner_user_id, User.name)
+        .join(Session, Session.id == VolumeMount.session_id)
+        .join(User, User.id == Session.owner_user_id, isouter=True)
+        .where(
+            VolumeMount.volume_id == volume_id,
+            Session.deleted_at.is_(None),
+            Session.status.notin_(("terminated", "error")),
+        )
+    )).all()
+    return VolumeRead.model_validate(vol).model_copy(
+        update={
+            "role": role, "owner_id": owner_key, "owner_name": owner_name,
+            "active_mounts": [
+                {"session_id": sid, "name": nm, "status": st,
+                 "mount_path": mp, "mode": md, "owner_user_id": ou, "owner_name": on}
+                for mp, md, sid, nm, st, ou, on in mounts
+            ],
+        }
+    )
 
 
 @router.patch("/{volume_id}", response_model=VolumeRead)
 async def update_volume(
     volume_id: str,
-    body: dict,
+    body: VolumePatch,
     principal: Principal = Depends(get_current_principal),
     db: AsyncSession = Depends(get_db),
 ):
-    """Update volume meta: quota_gb (>= used_gb) / access_mode."""
+    """Update volume meta: quota_gb / access_mode.
+
+    The quota is self-service in both directions. It may shrink down to what is actually in use;
+    an increase is bounded by the scope's storage policy — volumes are governed by the policy
+    limit alone, not billed (the claim itself cannot shrink: Kubernetes only grows a PVC).
+    """
     vol = await _load_volume(db, volume_id)
     _assert_can_manage_volume(principal, vol.scope, vol.scope_id)
 
-    new_quota = body.get("quota_gb")
+    new_quota = body.quota_gb
     if new_quota is not None:
         if int(new_quota) < vol.used_gb:
             # cannot shrink below current usage: quota_gb >= used_gb.
-            raise QuotaExceeded(f"quota_gb {new_quota} < used_gb {vol.used_gb}")
+            raise _ValidationFailed(
+                "quota_gb below current usage", {"quota_gb": int(new_quota), "used_gb": vol.used_gb}
+            )
         # An expansion is bounded by the same scope limit, with this volume excluded from the sum.
         await _assert_storage_quota(db, vol.scope, vol.scope_id, int(new_quota), exclude_volume_id=vol.id)
         vol.quota_gb = int(new_quota)
 
-    new_mode = body.get("access_mode")
+    new_mode = body.access_mode
     if new_mode is not None and new_mode != vol.access_mode:
         # access mode change while mounted is a conflict -> 409.
         if await _active_mount_session_ids(db, volume_id):
@@ -373,7 +514,7 @@ async def delete_volume(
         # confirmation token must equal the target volume_id -> 422.
         raise _ValidationFailed("confirmation_required")
     if await _active_mount_session_ids(db, volume_id):
-        raise InvalidStateTransition("volume is mounted by an active session")
+        raise VolumeMounted("volume is mounted by an active session")
     vol.deleted_at = datetime.now(UTC)
     await db.commit()
     await AuditService(db).record(
@@ -448,7 +589,8 @@ async def list_permissions(
     db: AsyncSession = Depends(get_db),
 ):
     """List volume share permissions with user names."""
-    await _load_volume(db, volume_id)
+    vol = await _load_volume(db, volume_id)
+    await _assert_volume_access(db, principal, vol)  # sharing table is not public
     rows = (
         await db.execute(
             select(VolumePermission, User.name)
@@ -490,6 +632,9 @@ async def grant_permission(
             raise _ValidationFailed("no user with that email", {"email": body.email})
     if not target_uid:
         raise _ValidationFailed("user_id or email required")
+    owner_uid = vol.owner_id or (vol.scope_id if vol.scope == "user" else None)
+    if target_uid == owner_uid:
+        raise _ValidationFailed("the owner already has full access", {"user_id": target_uid})
     perm = await db.scalar(
         select(VolumePermission).where(
             VolumePermission.volume_id == volume_id,
@@ -518,9 +663,13 @@ async def revoke_permission(
     principal: Principal = Depends(get_current_principal),
     db: AsyncSession = Depends(get_db),
 ):
-    """Revoke a share permission; refuse to remove the last owner."""
+    """Revoke a share permission; refuse to remove the last owner.
+
+    Removing YOURSELF (leaving a share) is always allowed — a recipient's "delete" is an
+    unshare, never a deletion of the original volume. Removing anyone else needs manage rights."""
     vol = await _load_volume(db, volume_id)
-    _assert_can_manage_volume(principal, vol.scope, vol.scope_id)
+    if principal.user_id != user_id:
+        _assert_can_manage_volume(principal, vol.scope, vol.scope_id)
     perm = await db.scalar(
         select(VolumePermission).where(
             VolumePermission.volume_id == volume_id,
@@ -544,181 +693,6 @@ async def revoke_permission(
     await db.commit()
 
 
-# ── quota-requests ──
-@router.post("/{volume_id}/quota-requests", status_code=status.HTTP_201_CREATED)
-async def create_quota_request(
-    volume_id: str,
-    body: QuotaRequestBody,
-    principal: Principal = Depends(get_current_principal),
-    db: AsyncSession = Depends(get_db),
-):
-    """Request a quota increase (target total > current quota)."""
-    vol = await _load_volume(db, volume_id)
-    if body.requested_gb <= vol.quota_gb:
-        # requested target must exceed current quota -> 422.
-        raise _ValidationFailed("requested_gb must be greater than current quota_gb")
-    req = VolumeQuotaRequest(
-        id=ids.new("quotarequest"),
-        volume_id=volume_id,
-        requested_gb=body.requested_gb,
-        status="pending",
-        requester_id=principal.user_id,
-    )
-    db.add(req)
-    await db.flush()
-    # Notify whoever approves an expansion: the group's administrators for a project volume, the
-    # system administrators otherwise.
-    notifier = NotificationService(db)
-    recipients = (await notifier.group_admins(vol.scope_id)) if vol.scope == "group" else (await notifier.system_admins())
-    await notifier.notify(
-        recipients, "volume_quota_request", "Volume expansion requested",
-        f"A request to expand a volume to {req.requested_gb} GiB has arrived.",
-        volume_id=volume_id, request_id=req.id,
-    )
-    await db.commit()
-    await db.refresh(req)
-    return {
-        "id": req.id,
-        "volume_id": req.volume_id,
-        "current_gb": vol.quota_gb,
-        "requested_gb": req.requested_gb,
-        "status": req.status,
-        "requested_by": req.requester_id,
-        "created_at": req.created_at.isoformat() if req.created_at else None,
-        "decided_by": req.decided_by,
-        "decided_at": None,
-    }
-
-
-@router.get("/{volume_id}/quota-requests")
-async def list_quota_requests(
-    volume_id: str,
-    status_filter: str | None = Query(default=None, alias="status"),
-    page: Pagination = Depends(Pagination),
-    principal: Principal = Depends(get_current_principal),
-    db: AsyncSession = Depends(get_db),
-):
-    """List quota-increase requests for a volume."""
-    vol = await _load_volume(db, volume_id)
-    stmt = select(VolumeQuotaRequest).where(VolumeQuotaRequest.volume_id == volume_id)
-    if status_filter is not None:
-        stmt = stmt.where(VolumeQuotaRequest.status == status_filter)
-    stmt = (
-        stmt.order_by(VolumeQuotaRequest.created_at.desc())
-        .offset(page.offset)
-        .limit(page.size)
-    )
-    rows = (await db.scalars(stmt)).all()
-    return {
-        "data": [
-            {
-                "id": r.id,
-                "volume_id": r.volume_id,
-                "current_gb": vol.quota_gb,
-                "requested_gb": r.requested_gb,
-                "status": r.status,
-                "requested_by": r.requester_id,
-                "created_at": r.created_at.isoformat() if r.created_at else None,
-            }
-            for r in rows
-        ]
-    }
-
-
-async def _load_quota_request(
-    db: AsyncSession, volume_id: str, request_id: str
-) -> VolumeQuotaRequest:
-    req = await db.get(VolumeQuotaRequest, request_id)
-    if req is None or req.volume_id != volume_id:
-        raise NotFound(f"quota request not found: {request_id}")
-    return req
-
-
-@router.post("/{volume_id}/quota-requests/{request_id}/approve")
-async def approve_quota_request(
-    volume_id: str,
-    request_id: str,
-    principal: Principal = Depends(get_current_principal),
-    db: AsyncSession = Depends(get_db),
-):
-    """Approve a quota request and raise volume.quota_gb in one txn."""
-    vol = await _load_volume(db, volume_id)
-    # Only an administrator of the volume's own scope may approve, which closes the cross-tenant
-    # hole that a group_id=None requirement would leave open.
-    _assert_can_manage_volume(principal, vol.scope, vol.scope_id)
-    req = await _load_quota_request(db, volume_id, request_id)
-    if req.status != "pending":
-        raise InvalidStateTransition(f"quota request already {req.status}")
-    # Re-check the scope limit at approval time, since it may have changed since the request.
-    await _assert_storage_quota(db, vol.scope, vol.scope_id, req.requested_gb, exclude_volume_id=vol.id)
-    req.status = "approved"
-    req.decided_by = principal.user_id
-    vol.quota_gb = req.requested_gb
-    await db.flush()
-    await NotificationService(db).notify(
-        [req.requester_id], "volume_quota_approved", "Volume expansion approved",
-        f"The volume was expanded to {vol.quota_gb} GiB.", volume_id=volume_id,
-    )
-    await db.commit()
-    await db.refresh(req)
-    await db.refresh(vol)
-    await AuditService(db).record(
-        actor=principal.user_id,
-        action="storage.quota.approve",
-        target=request_id,
-        volume_id=volume_id,
-        quota_gb=vol.quota_gb,
-    )
-    return {
-        "quota_request": {
-            "id": req.id,
-            "status": req.status,
-            "decided_by": req.decided_by,
-            "decided_at": req.updated_at.isoformat() if req.updated_at else None,
-        },
-        "volume": {"id": vol.id, "quota_gb": vol.quota_gb, "used_gb": vol.used_gb},
-    }
-
-
-@router.post("/{volume_id}/quota-requests/{request_id}/reject")
-async def reject_quota_request(
-    volume_id: str,
-    request_id: str,
-    body: dict | None = None,
-    principal: Principal = Depends(get_current_principal),
-    db: AsyncSession = Depends(get_db),
-):
-    """Reject a quota request (mirror of approve); quota_gb unchanged."""
-    vol = await _load_volume(db, volume_id)
-    _assert_can_manage_volume(principal, vol.scope, vol.scope_id)
-    req = await _load_quota_request(db, volume_id, request_id)
-    reason = (body or {}).get("reason")
-    if not reason:
-        # rejection reason is required -> 422.
-        raise _ValidationFailed("reason is required")
-    if req.status != "pending":
-        raise InvalidStateTransition(f"quota request already {req.status}")
-    req.status = "rejected"
-    req.decided_by = principal.user_id
-    await db.commit()
-    await db.refresh(req)
-    await AuditService(db).record(
-        actor=principal.user_id,
-        action="storage.quota.reject",
-        target=request_id,
-        volume_id=volume_id,
-        reason=reason,
-    )
-    return {
-        "id": req.id,
-        "volume_id": volume_id,
-        "status": req.status,
-        "decided_by": req.decided_by,
-        "decided_at": req.updated_at.isoformat() if req.updated_at else None,
-        "reason": reason,
-    }
-
-
 # ── snapshots ──
 @router.post("/{volume_id}/snapshots", status_code=status.HTTP_202_ACCEPTED)
 async def create_snapshot(
@@ -727,9 +701,12 @@ async def create_snapshot(
     principal: Principal = Depends(get_current_principal),
     db: AsyncSession = Depends(get_db),
 ):
-    """Create a point-in-time snapshot (async); reject if one is in progress."""
+    """NOT IMPLEMENTED: there is no CSI/storage integration behind snapshots — rows were being
+    auto-flipped to ready by a timer without any data being copied. Honest 501 until a real
+    snapshot backend exists (blocked on the storage-backend decision)."""
     vol = await _load_volume(db, volume_id)
     await _assert_volume_access(db, principal, vol)
+    raise NotImplementedFeature("volume snapshots are not implemented yet")
     in_progress = await db.scalar(
         select(VolumeSnapshot.id).where(
             VolumeSnapshot.volume_id == volume_id,
@@ -803,16 +780,18 @@ async def restore_snapshot(
     principal: Principal = Depends(get_current_principal),
     db: AsyncSession = Depends(get_db),
 ):
-    """Restore a volume to a snapshot; reject if mounted or snapshot not ready."""
+    """NOT IMPLEMENTED: restore performed no data operation (audit row + fabricated "restoring").
+    Honest 501 until a real snapshot backend exists."""
     vol = await _load_volume(db, volume_id)
     _assert_can_manage_volume(principal, vol.scope, vol.scope_id)
+    raise NotImplementedFeature("volume snapshot restore is not implemented yet")
     snap = await _load_snapshot(db, volume_id, snapshot_id)
     if (body or {}).get("confirm") != volume_id:
         raise _ValidationFailed("confirmation token mismatch")  # 422 
     if snap.status != "ready":
         raise InvalidStateTransition("snapshot is not ready")  # 409
     if await _active_mount_session_ids(db, volume_id):
-        raise InvalidStateTransition("volume is mounted by an active session")  # 409
+        raise VolumeMounted("volume is mounted by an active session")  # 409
     await AuditService(db).record(
         actor=principal.user_id,
         action="storage.snapshot.restore",

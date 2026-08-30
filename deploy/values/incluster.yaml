@@ -42,3 +42,6 @@ operator:
   # cluster-bootstrap already runs. That gives workload-aware idle reclamation with no separate
   # monitoring stack. If you run your own Prometheus, use prometheusUrl instead.
   hamiMonitorUrl: "http://hami-device-plugin-monitor.kube-system.svc:31992"
+  # With a storage node (cluster-info STORAGE_NODE): the democratic-csi class that gives volumes a
+  # real quota and every access mode. Leave unset to stay on the cluster default (local-path).
+  # volumeStorageClass: gshare-data

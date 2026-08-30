@@ -29,15 +29,21 @@ class NotificationService:
         type: str,
         title: str,
         body: str | None = None,
+        params: dict | None = None,
         **ref,
     ) -> None:
         """Add a notification for the given users, deduplicated. Empty and None recipients are
-        ignored."""
+        ignored.
+
+        `title`/`body` are the English fallback text; `params` carries the structured values the
+        console interpolates into its own locale template (notif.<type>.title/body)."""
         payload: dict = {"title": title}
         if body is not None:
             payload["body"] = body
         if ref:
             payload["ref"] = ref
+        if params:
+            payload["params"] = params
         recipients = {u for u in user_ids if u}
         for uid in recipients:
             self.db.add(

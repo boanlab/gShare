@@ -1,0 +1,29 @@
+# PyTorch on GPU: the official PyTorch image, which guarantees a matching CUDA and cuDNN pair, plus
+# the three GShare connection tools and SciPy.
+# Catalogue entry: name="PyTorch 2.6 · CUDA 12.4 (GPU)", tag=pytorch2.6-cuda12.4-cudnn9
+# Build context: build/images, so session-base/entrypoint.sh can be shared.
+FROM codercom/code-server:latest AS cs
+
+FROM pytorch/pytorch:2.7.1-cuda12.8-cudnn9-runtime
+ARG TTYD_VERSION=1.7.7
+
+COPY --from=cs /usr/lib/code-server /usr/lib/code-server
+COPY --from=cs /usr/bin/code-server /usr/bin/code-server
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      tini ca-certificates wget git iproute2 criu && \
+    rm -rf /var/lib/apt/lists/* && \
+    useradd -m -u 1000 -s /bin/bash coder
+# numpy comes with the base. This layer adds the connection runtime and the supporting data-science
+# packages; the framework's CUDA belongs to the base.
+RUN pip install --no-cache-dir jupyterlab notebook pandas matplotlib scikit-learn scipy
+RUN wget -qO /usr/local/bin/ttyd \
+      "https://github.com/tsl0922/ttyd/releases/download/${TTYD_VERSION}/ttyd.x86_64" && \
+    chmod +x /usr/local/bin/ttyd
+
+COPY session-base/entrypoint.sh /usr/local/bin/gshare-session
+RUN chmod +x /usr/local/bin/gshare-session
+
+USER 1000
+ENV HOME=/home/coder
+EXPOSE 8080 8888 7681
+ENTRYPOINT ["tini", "--", "/usr/local/bin/gshare-session"]

@@ -14,6 +14,11 @@ class Settings(BaseSettings):
     DATABASE_URL: str = "postgresql+asyncpg://gshare:gshare@localhost:5432/gshare"
     REDIS_URL: str = "redis://localhost:6379/0"
 
+    # ── Database connection pool (per process). SSE streams hold no pooled connection (see
+    # get_sse_principal), so this only has to cover request-scoped work. ──
+    DB_POOL_SIZE: int = 20
+    DB_MAX_OVERFLOW: int = 10
+
     # JWKS cache TTL for the internal RS256 JWT verifier (below).
     JWKS_TTL_SEC: int = 3600
 
@@ -62,11 +67,29 @@ class Settings(BaseSettings):
     SESSION_DOMAIN: str = "gshare.example.com"
     SESSION_URL_SCHEME: str = "https"
     SESSIONS_NAMESPACE: str = "gshare-sessions"        # namespace holding session pods and services
+    # Console image builds: registry prefix kaniko pushes to; final ref is
+    # {BUILD_REGISTRY}/{user_id}/{name}:{tag} (lowercased). Env: GSHARE_BUILD_REGISTRY.
+    BUILD_REGISTRY: str = "registry.gshare.internal/gshare-user"
     BILLING_INTERVAL_SEC: int = 60
     IDLE_TIMEOUT_SEC: int = 1800            # stamped on the CR; operator reaper idle window
     # Grace window in seconds after credits run out. Still unpaid when it elapses, the session is
     # gracefully paused or yielded. (See docs/paper/manuscript, §Design.)
     GRACE_PERIOD_SEC: int = 600
+    # ── Per-card GPU pools ──
+    # When on (with the operator's --per-card-mode), pool membership is a per-CARD ledger fact:
+    # every GPU session flows through hami-scheduler pinned to the reserved card, exclusive is a
+    # 100% HAMi slice, and the gshare.io/gpu-mode node labels stop mattering for placement.
+    PER_CARD_MODE: bool = False
+
+    # Audit-log retention in days; 0 keeps everything (not recommended at scale).
+    AUDIT_RETENTION_DAYS: int = 180
+
+    # ── Queue fairness (see app/domain/queue_ranking.py). Constants are bounded so that the
+    # maximum combined penalty (10*ACTIVE + 24*RECENT) stays below the 1440-minute aging cap:
+    # a user with zero usage always outranks a non-priority heavy user eventually. ──
+    QUEUE_ACTIVE_PENALTY: float = 30.0        # minutes of aging lost per already-active GPU session
+    QUEUE_RECENT_HOURS_PENALTY: float = 2.0   # minutes of aging lost per GPU-hour used in the last 24h
+
     # ── Balance guardrail for fractional allocations (anti-fragmentation) ──
     # The core share is measured against the whole physical GPU (100), and the VRAM share against
     # the chosen model's full-card VRAM. When the two diverge by more than GPU_BALANCE_TOLERANCE —
@@ -81,17 +104,21 @@ class Settings(BaseSettings):
     # onto cards and keeping empty ones free) or spread (balance the load).
     GPU_PACKING: str = "binpack"
     PROMETHEUS_URL: str = "http://prometheus.monitoring.svc:9090"  # source of aggregated DCGM utilisation
-    # ── Hourly credit rates for compute (CPU sessions) ──
-    # Priced proportionally to cpu, mem, and disk, rounded to whole credits. For example
-    # 4 vCPU, 16 GiB, 50 GiB is 1*4 + 0.1*16 + 0.02*50 = 6.6, so 7 credits/hour — cheap next to the
-    # 100 credits/hour of a full GPU card.
-    COMPUTE_CREDIT_PER_VCPU: float = 1.0
-    COMPUTE_CREDIT_PER_GB_MEM: float = 0.1
-    COMPUTE_CREDIT_PER_GB_DISK: float = 0.02
+    # ── Host admission headroom ──
+    # Host headroom kept out of admission on every node, covering the kubelet/system reserve and
+    # daemonset pods, so a session admitted against inventory capacity still schedules. A card only
+    # counts as a placement candidate when its node has cpu/mem left for the session's request.
+    NODE_RESERVED_CPU: int = 1
+    NODE_RESERVED_MEM_GB: int = 2
     # Rate for keeping persistent storage (data volumes), billed continuously per GB-hour against
     # the provisioned quota_gb, whether or not a session is running. 0 disables storage billing.
     # Tunable through GSHARE_STORAGE_CREDIT_PER_GB_HOUR without a rebuild.
     STORAGE_CREDIT_PER_GB_HOUR: float = 0.01
+    # How long a deleted volume's data is kept before the operator reclaims its PVC (and, through
+    # the CSI driver, the dataset on the storage node). Soft-delete keeps the ledger row; this is
+    # the window in which an accidental delete can still be recovered by an operator on the storage
+    # side. 0 reclaims on the next sync. GSHARE_VOLUME_RECLAIM_GRACE_HOURS.
+    VOLUME_RECLAIM_GRACE_HOURS: float = 24
     # Rate multiplier for spot sessions. A preemptible session borrows a card a resident yielded and
     # is reclaimed when the resident returns, so it pays only this fraction of the normal rate
     # (0.3 = 30%). (See docs/paper/manuscript, §Design.)

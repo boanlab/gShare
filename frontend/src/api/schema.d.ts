@@ -100,6 +100,57 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/users/bulk": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Bulk Create Users
+         * @description Roster import: create up to 200 users per request, each with a personal wallet, a
+         *     membership in the chosen group, and a server-generated initial password returned once in the
+         *     response (must_change_password forces rotation at first login).
+         *
+         *     Partial success by design: rows report ``created`` / ``exists`` / ``invalid`` individually so
+         *     re-uploading a roster is safe — existing accounts are reported, not fatal. The whole batch is
+         *     idempotent on the Idempotency-Key (a replay returns the stored result, passwords included,
+         *     for 24h). One audit record per batch, not one per student. super_admin·org_admin.
+         */
+        post: operations["bulk_create_users_api_v1_users_bulk_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/users/resolve": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Resolve User
+         * @description Resolve an EXACT email to {id, name} for the volume-share confirm step.
+         *
+         *     Any authenticated user may call it: sharing needs "does this address exist, and who is it",
+         *     and members cannot list users. Only an exact match answers — no enumeration surface beyond
+         *     what grant-by-email already reveals.
+         */
+        get: operations["resolve_user_api_v1_users_resolve_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/users/{user_id}": {
         parameters: {
             query?: never;
@@ -134,6 +185,29 @@ export interface paths {
          *     - The user themselves: their display name only.
          */
         patch: operations["update_user_api_v1_users__user_id__patch"];
+        trace?: never;
+    };
+    "/api/v1/users/{user_id}/usage": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get User Usage
+         * @description Live resource footprint: sessions, host compute, GPU slices, volumes, wallet.
+         *
+         *     Self or an administrator (``user.read``). Everything is CURRENT state, not history — the
+         *     admin drawer answers "what is this user holding right now?".
+         */
+        get: operations["get_user_usage_api_v1_users__user_id__usage_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
         trace?: never;
     };
     "/api/v1/users/{user_id}/department": {
@@ -510,6 +584,30 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/credits/refill-schedule": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get Refill Schedule
+         * @description When the monthly refill fires: day-of-month and hour (KST). Defaults: day 1, 00:00.
+         */
+        get: operations["get_refill_schedule_api_v1_credits_refill_schedule_get"];
+        /**
+         * Set Refill Schedule
+         * @description Set the refill day/hour. super_admin — the same authority that sets the monthly total.
+         */
+        put: operations["set_refill_schedule_api_v1_credits_refill_schedule_put"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/credits/allocate": {
         parameters: {
             query?: never;
@@ -558,6 +656,56 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/credits/bulk-allocate": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Bulk Allocate
+         * @description Allocate ``amount`` from the group's wallet to EVERY member's personal wallet at once.
+         *
+         *     The source balance is checked up front against n×amount (402 on shortfall — all or nothing,
+         *     no partially funded cohort), and every per-wallet transaction carries an idempotency key
+         *     derived from the batch key, so a replay after a crash completes exactly once per member.
+         *     group_admin and above.
+         */
+        post: operations["bulk_allocate_api_v1_credits_bulk_allocate_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/credits/bulk-monthly-grant": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Bulk Monthly Grant
+         * @description Set the same monthly refill on every member wallet of the group.
+         *
+         *     The ceiling check runs once for the whole cohort: n×amount must stay within the group
+         *     wallet's own monthly grant (the same sibling-sum invariant set_monthly_grant enforces
+         *     per wallet, without the O(n²) of calling it n times). Increases credit immediately, like
+         *     the single-wallet endpoint. group_admin and above.
+         */
+        post: operations["bulk_monthly_grant_api_v1_credits_bulk_monthly_grant_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/credits/allocation-requests": {
         parameters: {
             query?: never;
@@ -568,7 +716,7 @@ export interface paths {
         /**
          * List Allocation Requests
          * @description box=mine lists the requests you raised; box=incoming lists pending requests you can
-         *     approve.
+         *     approve; box=handled lists the decided ones from the same inbox — the approver's history.
          */
         get: operations["list_allocation_requests_api_v1_credits_allocation_requests_get"];
         put?: never;
@@ -622,21 +770,25 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/v1/credits/allocation-requests/{request_id}/escalate": {
+    "/api/v1/credits/wallets/{wallet_id}/spend-daily": {
         parameters: {
             query?: never;
             header?: never;
             path?: never;
             cookie?: never;
         };
-        get?: never;
-        put?: never;
         /**
-         * Escalate Allocation Request
-         * @description When the pool is short, let the approver raise a funding request one tier up. The original
-         *     request stays pending.
+         * Spend Daily
+         * @description Daily spend (consume + storage) over [from, to], for the wallet's usage chart.
+         *
+         *     Aggregation happens here rather than over the paged ledger: a chart drawn from page one of the
+         *     transactions would silently truncate. Buckets follow the caller's clock via tz_offset_min
+         *     (KST = +540), since "a day" on the chart is the user's day, not UTC's. Aggregated in Python so
+         *     the same query runs on Postgres and the SQLite test harness; the range is capped to a year.
          */
-        post: operations["escalate_allocation_request_api_v1_credits_allocation_requests__request_id__escalate_post"];
+        get: operations["spend_daily_api_v1_credits_wallets__wallet_id__spend_daily_get"];
+        put?: never;
+        post?: never;
         delete?: never;
         options?: never;
         head?: never;
@@ -650,7 +802,15 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** Transactions */
+        /**
+         * Transactions
+         * @description The wallet ledger.
+         *
+         *     group="session" rolls the per-minute consume rows of one session into a single line (period,
+         *     total, entry count); every other transaction type is a discrete event and passes through
+         *     untouched. Grouping happens in SQL because a long session produces hundreds of rows: folding
+         *     them client-side would only fold whatever landed on the current page.
+         */
         get: operations["transactions_api_v1_credits_wallets__wallet_id__transactions_get"];
         put?: never;
         post?: never;
@@ -805,6 +965,9 @@ export interface paths {
         /**
          * List Offerings
          * @description Catalog list. Authenticated-but-open read; no admin gate.
+         *
+         *     Retired (status=inactive) offerings are hidden from non-admins; administrators still see
+         *     them so they can reactivate or audit pricing.
          */
         get: operations["list_offerings_api_v1_offerings_get"];
         put?: never;
@@ -922,8 +1085,9 @@ export interface paths {
          * @description The effective policy for the caller, with current usage and headroom, so the session wizard
          *     can show the limits.
          *
-         *     Resolution order: user, then group when a group_id is given, then the organization derived from
-         *     that group, then global. Usage is the sum over active sessions in the same scope.
+         *     Resolution is the per-field merge in app.domain.policy (user → group → org → global), the
+         *     same module the admission gate uses. Caps are per user, so usage sums over the CALLER's
+         *     active sessions regardless of group.
          */
         get: operations["effective_policy_api_v1_resource_policies_effective_get"];
         put?: never;
@@ -946,6 +1110,67 @@ export interface paths {
         put?: never;
         /** Create Policy */
         post: operations["create_policy_api_v1_resource_policies_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/resource-policies/requests": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List Resource Requests */
+        get: operations["list_resource_requests_api_v1_resource_policies_requests_get"];
+        put?: never;
+        /**
+         * Create Resource Request
+         * @description Ask for a bigger compute quota. At least one target, all positive; note required.
+         */
+        post: operations["create_resource_request_api_v1_resource_policies_requests_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/resource-policies/requests/{request_id}/approve": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Approve Resource Request
+         * @description Approve: upsert the requester's USER-scope policy with ONLY the granted limit keys.
+         *
+         *     Everything not granted stays inherited (per-field most-specific merge), so the group/global
+         *     defaults remain the single source for the rest of the policy.
+         */
+        post: operations["approve_resource_request_api_v1_resource_policies_requests__request_id__approve_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/resource-policies/requests/{request_id}/reject": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Reject Resource Request */
+        post: operations["reject_resource_request_api_v1_resource_policies_requests__request_id__reject_post"];
         delete?: never;
         options?: never;
         head?: never;
@@ -1180,7 +1405,8 @@ export interface paths {
         put?: never;
         /**
          * Force Terminate
-         * @description Admin force-terminate without owner consent.
+         * @description Admin force-terminate without owner consent. The free-text reason lands in the audit log;
+         *     the session's status_reason stays the typed `admin_stopped` the console maps to a message.
          */
         post: operations["force_terminate_api_v1_sessions__session_id__force_terminate_post"];
         delete?: never;
@@ -1218,10 +1444,9 @@ export interface paths {
         };
         /**
          * Session Logs
-         * @description Recent container/lifecycle log lines.
-         *
-         *     Log content originates in the workload Pod (operator/k8s layer). This plane reads the lines the
-         *     operator has streamed into Redis (``logs:{ses}`` list, newest appended); returns the tail.
+         * @description NOT IMPLEMENTED: nothing streams pod logs into this plane (the operator has no Redis
+         *     producer), so this always returned an empty list dressed up as a log. Honest 501 until a log
+         *     pipeline exists — use `kubectl logs` on the session pod meanwhile.
          */
         get: operations["session_logs_api_v1_sessions__session_id__logs_get"];
         put?: never;
@@ -1241,9 +1466,70 @@ export interface paths {
         };
         /**
          * Session Connections
-         * @description Issue one-time cnx_ connection tokens.
+         * @description Issue one-time cnx_ connection tokens; `kind` narrows to one app (one token minted).
          */
         get: operations["session_connections_api_v1_sessions__session_id__connections_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/sessions/{session_id}/usage": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Session Usage Self
+         * @description Measured live usage of the session's pod (owner·admin) — the detail page's meters.
+         */
+        get: operations["session_usage_self_api_v1_sessions__session_id__usage_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/sessions/{session_id}/usage/timeseries": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Session Usage Series Self
+         * @description The usage metrics over a range (owner·admin) — the detail page's sparklines.
+         */
+        get: operations["session_usage_series_self_api_v1_sessions__session_id__usage_timeseries_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/sessions/{session_id}/timeline": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Session Timeline
+         * @description Lifecycle timeline for the detail screen: created → queued/preparing → running → … with
+         *     reasons, so an error state is readable from the log instead of a separate message box.
+         */
+        get: operations["session_timeline_api_v1_sessions__session_id__timeline_get"];
         put?: never;
         post?: never;
         delete?: never;
@@ -1267,7 +1553,8 @@ export interface paths {
         put?: never;
         /**
          * Create Checkpoint
-         * @description Create a point-in-time checkpoint (async).
+         * @description NOT IMPLEMENTED: no worker or operator path takes a checkpoint yet — a row here would be
+         *     an empty promise (storage_ref stays NULL forever). Honest 501 until the pipeline exists.
          */
         post: operations["create_checkpoint_api_v1_sessions__session_id__checkpoints_post"];
         delete?: never;
@@ -1287,7 +1574,8 @@ export interface paths {
         put?: never;
         /**
          * Restore Checkpoint
-         * @description Restore a session from a checkpoint (async).
+         * @description NOT IMPLEMENTED: restore has no execution path (the operator's checkpointer states restore
+         *     is intentionally unimplemented) — returning "restoring" here was a fabrication. Honest 501.
          */
         post: operations["restore_checkpoint_api_v1_sessions__session_id__checkpoints__checkpoint_id__restore_post"];
         delete?: never;
@@ -1310,6 +1598,9 @@ export interface paths {
          *     Subscribes to the session's status-change channel (Redis pub/sub fed by status_sync) and pushes
          *     status_changed / phase / allocation / heartbeat events. 404/403 are raised before the stream is
          *     established; the stream terminates cleanly on client disconnect.
+         *
+         *     The access check opens its own short-lived DB session: a Depends(get_db) session would stay
+         *     checked out of the pool for the whole stream (see get_sse_principal).
          */
         get: operations["session_events_api_v1_sessions__session_id__events_get"];
         put?: never;
@@ -1373,7 +1664,7 @@ export interface paths {
         head?: never;
         /**
          * Update Priority
-         * @description Admin reorders the queue. Updates QueueEntry.priority + gshare:queue ZSET score.
+         * @description Admin reorders the queue: QueueEntry.priority sets the priority band.
          */
         patch: operations["update_priority_api_v1_queue__queue_entry_id__patch"];
         trace?: never;
@@ -1388,6 +1679,10 @@ export interface paths {
         /**
          * List Volumes
          * @description List volumes with scope/type/access_mode filters + pagination.
+         *
+         *     Default view is the caller's own world for every role — the user console must show a
+         *     super_admin their volumes, not everyone's. `?all=true` (super_admin only) lists the fleet
+         *     for the admin volume page.
          */
         get: operations["list_volumes_api_v1_storage_volumes_get"];
         put?: never;
@@ -1429,28 +1724,6 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/v1/storage/volumes/pricing": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /**
-         * Volume Pricing
-         * @description The storage rate in credits per GB-hour. The new-volume form multiplies it by quota_gb to
-         *     show the estimated hourly and monthly cost. 0 disables storage billing. This is
-         *     STORAGE_CREDIT_PER_GB_HOUR, the same rate the storage_billing worker charges.
-         */
-        get: operations["volume_pricing_api_v1_storage_volumes_pricing_get"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
     "/api/v1/storage/volumes/{volume_id}": {
         parameters: {
             query?: never;
@@ -1474,7 +1747,11 @@ export interface paths {
         head?: never;
         /**
          * Update Volume
-         * @description Update volume meta: quota_gb (>= used_gb) / access_mode.
+         * @description Update volume meta: quota_gb / access_mode.
+         *
+         *     The quota is self-service in both directions. It may shrink down to what is actually in use;
+         *     an increase is bounded by the scope's storage policy — volumes are governed by the policy
+         *     limit alone, not billed (the claim itself cannot shrink: Kubernetes only grows a PVC).
          */
         patch: operations["update_volume_api_v1_storage_volumes__volume_id__patch"];
         trace?: never;
@@ -1540,72 +1817,11 @@ export interface paths {
         /**
          * Revoke Permission
          * @description Revoke a share permission; refuse to remove the last owner.
+         *
+         *     Removing YOURSELF (leaving a share) is always allowed — a recipient's "delete" is an
+         *     unshare, never a deletion of the original volume. Removing anyone else needs manage rights.
          */
         delete: operations["revoke_permission_api_v1_storage_volumes__volume_id__permissions__user_id__delete"];
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/api/v1/storage/volumes/{volume_id}/quota-requests": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /**
-         * List Quota Requests
-         * @description List quota-increase requests for a volume.
-         */
-        get: operations["list_quota_requests_api_v1_storage_volumes__volume_id__quota_requests_get"];
-        put?: never;
-        /**
-         * Create Quota Request
-         * @description Request a quota increase (target total > current quota).
-         */
-        post: operations["create_quota_request_api_v1_storage_volumes__volume_id__quota_requests_post"];
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/api/v1/storage/volumes/{volume_id}/quota-requests/{request_id}/approve": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get?: never;
-        put?: never;
-        /**
-         * Approve Quota Request
-         * @description Approve a quota request and raise volume.quota_gb in one txn.
-         */
-        post: operations["approve_quota_request_api_v1_storage_volumes__volume_id__quota_requests__request_id__approve_post"];
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/api/v1/storage/volumes/{volume_id}/quota-requests/{request_id}/reject": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get?: never;
-        put?: never;
-        /**
-         * Reject Quota Request
-         * @description Reject a quota request (mirror of approve); quota_gb unchanged.
-         */
-        post: operations["reject_quota_request_api_v1_storage_volumes__volume_id__quota_requests__request_id__reject_post"];
-        delete?: never;
         options?: never;
         head?: never;
         patch?: never;
@@ -1626,7 +1842,9 @@ export interface paths {
         put?: never;
         /**
          * Create Snapshot
-         * @description Create a point-in-time snapshot (async); reject if one is in progress.
+         * @description NOT IMPLEMENTED: there is no CSI/storage integration behind snapshots — rows were being
+         *     auto-flipped to ready by a timer without any data being copied. Honest 501 until a real
+         *     snapshot backend exists (blocked on the storage-backend decision).
          */
         post: operations["create_snapshot_api_v1_storage_volumes__volume_id__snapshots_post"];
         delete?: never;
@@ -1646,7 +1864,8 @@ export interface paths {
         put?: never;
         /**
          * Restore Snapshot
-         * @description Restore a volume to a snapshot; reject if mounted or snapshot not ready.
+         * @description NOT IMPLEMENTED: restore performed no data operation (audit row + fabricated "restoring").
+         *     Honest 501 until a real snapshot backend exists.
          */
         post: operations["restore_snapshot_api_v1_storage_volumes__volume_id__snapshots__snapshot_id__restore_post"];
         delete?: never;
@@ -1793,7 +2012,16 @@ export interface paths {
         get: operations["get_image_api_v1_images__image_id__get"];
         put?: never;
         post?: never;
-        delete?: never;
+        /**
+         * Delete Image
+         * @description Delete a catalogue image that no session has ever used. super_admin, gated on image.create.
+         *
+         *     Sessions keep a foreign key to their image for the audit trail, so an image with any session
+         *     history cannot be deleted — retire it instead by setting ``public: false``.
+         *
+         *     Owners may delete their OWN built (private) images; everything else stays admin-gated.
+         */
+        delete: operations["delete_image_api_v1_images__image_id__delete"];
         options?: never;
         head?: never;
         /**
@@ -1815,12 +2043,24 @@ export interface paths {
         put?: never;
         /**
          * Import Image
-         * @description Register an image from an external registry/URL; async pull begins. super_admin·org_admin.
+         * @description Register an image from an external registry reference. any authenticated.
          *
-         *     Persists the Image row with ``import_status=pulling`` and returns 202. The registry pull worker
-         *     converges ``import_status`` -> ready|failed and the result is observed via GET /images/{id} or a
-         *     webhook. This plane never pulls inline; ``registry_auth`` is forwarded to the worker
-         *     and never persisted in the catalog row.
+         *     Registration is synchronous catalog metadata: the actual pull happens on the GPU node's
+         *     container runtime when a session using the image first starts (there is no control-plane pull
+         *     worker). The row is therefore created ``import_status=ready`` immediately. Private-registry
+         *     credentials are not supported yet — imagePullSecrets plumbing does not exist — so a request
+         *     carrying ``registry_auth`` is refused rather than silently losing the credential.
+         *
+         *     Who owns the row:
+         *
+         *     * ``image.create`` holders (super_admin) register SHARED catalog entries — ``owner_user_id``
+         *       null, ``public`` as given. Re-registering a ref that already exists as a shared row is a 409.
+         *     * everyone else registers a PRIVATE row they own (``public=false``, ``kind=container``), which
+         *       only they and admins can see. The same public ref may therefore be imported by many members.
+         *
+         *     Always answers 202. Deduplication never fails the request: re-importing your own ref, or a ref
+         *     that is already in the shared catalogue, returns that row with ``existing: true`` instead of
+         *     creating a second one — the caller uses the returned ``id`` either way.
          */
         post: operations["import_image_api_v1_images_import_post"];
         delete?: never;
@@ -1844,7 +2084,11 @@ export interface paths {
         put?: never;
         /**
          * Create Build
-         * @description Start an async image build from a dockerfile/git source. group_admin+ on the project.
+         * @description Create a console image build: record desired state, then hand the GShareImageBuild CR to
+         *     the operator (which runs kaniko and reports back via /internal/image-builds/{id}/status).
+         *
+         *     Members build for themselves; the pushed image lands as a PRIVATE Image row
+         *     (owner + admins only). One build in flight per user.
          */
         post: operations["create_build_api_v1_image_builds_post"];
         delete?: never;
@@ -1882,11 +2126,7 @@ export interface paths {
         };
         /**
          * Build Logs
-         * @description Build (Kaniko) stage logs.
-         *
-         *     Logs are produced by the build pipeline (registry/Kaniko) and are not persisted in this control
-         *     plane's DB; we return the structured envelope with whatever log lines the pipeline has surfaced
-         *     for this build. With no pipeline attached in-sandbox this is an empty (but well-formed) stream.
+         * @description Return the stored kaniko log tail (the operator reports the last ~16KB on each callback).
          */
         get: operations["build_logs_api_v1_image_builds__build_id__logs_get"];
         put?: never;
@@ -1935,7 +2175,11 @@ export interface paths {
         get: operations["list_notifications_api_v1_notifications_get"];
         put?: never;
         post?: never;
-        delete?: never;
+        /**
+         * Delete All Notifications
+         * @description Delete every notification of the caller. Self-scoped by construction.
+         */
+        delete: operations["delete_all_notifications_api_v1_notifications_delete"];
         options?: never;
         head?: never;
         patch?: never;
@@ -1961,6 +2205,26 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/notifications/{notification_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /**
+         * Delete Notification
+         * @description Delete one of the caller's notifications. 404 for other users' rows (no existence leak).
+         */
+        delete: operations["delete_notification_api_v1_notifications__notification_id__delete"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/notifications/read-all": {
         parameters: {
             query?: never;
@@ -1975,6 +2239,112 @@ export interface paths {
          * @description Bulk mark the caller's unread notifications read, optionally bounded.
          */
         post: operations["mark_all_read_api_v1_notifications_read_all_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/notices": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List Notices */
+        get: operations["list_notices_api_v1_notices_get"];
+        put?: never;
+        /** Create Notice */
+        post: operations["create_notice_api_v1_notices_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/notices/{notice_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /** Delete Notice */
+        delete: operations["delete_notice_api_v1_notices__notice_id__delete"];
+        options?: never;
+        head?: never;
+        /** Update Notice */
+        patch: operations["update_notice_api_v1_notices__notice_id__patch"];
+        trace?: never;
+    };
+    "/api/v1/inquiries": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List Inquiries */
+        get: operations["list_inquiries_api_v1_inquiries_get"];
+        put?: never;
+        /** Create Inquiry */
+        post: operations["create_inquiry_api_v1_inquiries_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/inquiries/{inquiry_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Get Inquiry */
+        get: operations["get_inquiry_api_v1_inquiries__inquiry_id__get"];
+        put?: never;
+        post?: never;
+        /** Delete Inquiry */
+        delete: operations["delete_inquiry_api_v1_inquiries__inquiry_id__delete"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/inquiries/{inquiry_id}/replies": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Reply Inquiry */
+        post: operations["reply_inquiry_api_v1_inquiries__inquiry_id__replies_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/inquiries/{inquiry_id}/close": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Close Inquiry */
+        post: operations["close_inquiry_api_v1_inquiries__inquiry_id__close_post"];
         delete?: never;
         options?: never;
         head?: never;
@@ -2130,12 +2500,124 @@ export interface paths {
          * Drain Node
          * @description Drain a node. super_admin only.
          *
-         *     Cordons the node and reports the sessions holding live allocations on its devices as affected.
-         *     The actual rescheduling or forced termination is the operator's job; this endpoint only records
-         *     the desired state and computes the blast radius.
+         *     Both modes cordon FIRST (no new placements can land back), then act on every session holding
+         *     a live allocation on the node's devices:
+         *       - reschedule: pause → resume each running/preparing session. Resume re-runs placement,
+         *         which excludes cordoned nodes — the session comes back on another eligible card (same
+         *         GPU model, enough VRAM/cores, pool access). No capacity ⇒ the session stays PAUSED
+         *         ("parked"): work preserved, owner can resume later.
+         *       - force_terminate: terminate each affected session (settled like an admin stop).
          */
         post: operations["drain_node_api_v1_nodes__node_id__drain_post"];
         delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/node-pools": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List Node Pools
+         * @description List node pools. An org_admin sees only the pools carrying a grant for one of their
+         *     organizations (or a group in them).
+         */
+        get: operations["list_node_pools_api_v1_node_pools_get"];
+        put?: never;
+        /** Create Node Pool */
+        post: operations["create_node_pool_api_v1_node_pools_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/node-pools/{pool_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /**
+         * Delete Node Pool
+         * @description Delete a pool: its nodes become shared (pool_id NULL) and its grants go with it. Refused
+         *     while any live session holds an allocation on one of its nodes — cordon and drain first.
+         */
+        delete: operations["delete_node_pool_api_v1_node_pools__pool_id__delete"];
+        options?: never;
+        head?: never;
+        /** Update Node Pool */
+        patch: operations["update_node_pool_api_v1_node_pools__pool_id__patch"];
+        trace?: never;
+    };
+    "/api/v1/nodes/{node_id}/pool": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        /**
+         * Set Node Pool
+         * @description Move a node into a pool (or back to shared with pool_id null). The pool must be in the
+         *     node's cluster. Sessions already on the node are left alone; only new placements change.
+         */
+        put: operations["set_node_pool_api_v1_nodes__node_id__pool_put"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/node-pools/{pool_id}/grants": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Grant Node Pool
+         * @description Grant a pool to an organization or group. super_admin: anything (the target must exist).
+         *     org_admin: only sub-assignment of a pool already granted to their organization, to a group in
+         *     that organization (domain.node_pools.assert_may_grant).
+         */
+        post: operations["grant_node_pool_api_v1_node_pools__pool_id__grants_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/node-pools/{pool_id}/grants/{grant_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /**
+         * Revoke Node Pool Grant
+         * @description Revoke a grant. Same rule as granting: an org_admin may only remove group grants inside an
+         *     organization the pool is granted to.
+         */
+        delete: operations["revoke_node_pool_grant_api_v1_node_pools__pool_id__grants__grant_id__delete"];
         options?: never;
         head?: never;
         patch?: never;
@@ -2151,6 +2633,52 @@ export interface paths {
         /** List Gpu Devices */
         get: operations["list_gpu_devices_api_v1_gpu_devices_get"];
         put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/gpu-devices/{device_id}/mode": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        /**
+         * Set Gpu Device Mode
+         * @description Set a card's target pool (per-CARD, not per-node). super_admin, same tier as cordon.
+         *
+         *     fractional↔exclusive is a metadata change applied as soon as the card is empty; ↔mig also
+         *     needs the node-side geometry change, executed by the drain state machine (the card stops
+         *     accepting placements immediately and flips when its last allocation ends).
+         */
+        put: operations["set_gpu_device_mode_api_v1_gpu_devices__device_id__mode_put"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/gpu-pools/{cluster_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        /**
+         * Set Pool Targets
+         * @description Set the cluster's MIG/hami-core pool split by TARGET COUNT — the console's coarse control
+         *     (simpler and safer than dragging individual cards). The emptiest eligible cards are chosen;
+         *     each transition drains first and runs through the GpuModeChange machinery.
+         */
+        put: operations["set_pool_targets_api_v1_gpu_pools__cluster_id__put"];
         post?: never;
         delete?: never;
         options?: never;
@@ -2200,6 +2728,134 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/monitoring/status": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Monitoring Status
+         * @description Whether the metrics backend answers, so the page can say "not configured" instead of
+         *     rendering empty charts.
+         */
+        get: operations["monitoring_status_api_v1_monitoring_status_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/monitoring/sessions/{session_id}/usage": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Session Usage
+         * @description Measured live usage of ONE session's pod: cadvisor CPU/MEM + HAMi VRAM/GPU-core.
+         *
+         *     Instant values for the monitor drawer, refreshed by the console. VRAM and core come from
+         *     HAMi's in-container monitor, which only reports while a CUDA context exists — an idle
+         *     notebook legitimately reads 0 there while CPU/MEM still move.
+         */
+        get: operations["session_usage_api_v1_monitoring_sessions__session_id__usage_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/monitoring/sessions/{session_id}/usage/timeseries": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Session Usage Timeseries
+         * @description The four per-session usage metrics over a range, for the monitor detail sparklines.
+         */
+        get: operations["session_usage_timeseries_api_v1_monitoring_sessions__session_id__usage_timeseries_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/monitoring/timeseries": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Monitoring Timeseries
+         * @description One panel over a time range. The panel id selects the query; the console never sends PromQL.
+         */
+        get: operations["monitoring_timeseries_api_v1_monitoring_timeseries_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/monitoring/instant": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Monitoring Instant
+         * @description Current value per series — the snapshot table and the tiles.
+         */
+        get: operations["monitoring_instant_api_v1_monitoring_instant_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/monitoring/gpu-inventory": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Monitoring Gpu Inventory
+         * @description The ledger's view of each card: mode, allocated VRAM/cores, and the sessions holding it.
+         *
+         *     DCGM cannot attribute a shared card's usage to a session (HAMi splits below its visibility), so
+         *     session attribution comes from the control plane instead of being guessed from metrics.
+         */
+        get: operations["monitoring_gpu_inventory_api_v1_monitoring_gpu_inventory_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/internal/sessions/{session_id}/status": {
         parameters: {
             query?: never;
@@ -2211,6 +2867,23 @@ export interface paths {
         put?: never;
         /** Report Status */
         post: operations["report_status_internal_sessions__session_id__status_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/internal/image-builds/{build_id}/status": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Report Build Status */
+        post: operations["report_build_status_internal_image_builds__build_id__status_post"];
         delete?: never;
         options?: never;
         head?: never;
@@ -2342,6 +3015,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/internal/volumes/sync": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Sync Volumes */
+        post: operations["sync_volumes_internal_volumes_sync_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/healthz": {
         parameters: {
             query?: never;
@@ -2380,13 +3070,6 @@ export interface components {
             amount: number | string;
             /** Reason */
             reason?: string | null;
-        };
-        /** AllocationEscalateBody */
-        AllocationEscalateBody: {
-            /** Amount */
-            amount?: number | string | null;
-            /** Note */
-            note?: string | null;
         };
         /** AllocationRejectBody */
         AllocationRejectBody: {
@@ -2452,6 +3135,8 @@ export interface components {
             at?: string | null;
             /** Actor Name */
             actor_name?: string | null;
+            /** Actor Email */
+            actor_email?: string | null;
             /** Target Name */
             target_name?: string | null;
         };
@@ -2587,6 +3272,33 @@ export interface components {
             /** Target Tag */
             target_tag?: string | null;
         };
+        /** BuildStatusEvent */
+        BuildStatusEvent: {
+            /** Phase */
+            phase: string;
+            /** Image Ref */
+            image_ref?: string | null;
+            /** Error */
+            error?: string | null;
+            /** Log Tail */
+            log_tail?: string | null;
+        };
+        /** BulkAllocateBody */
+        BulkAllocateBody: {
+            /** Group Id */
+            group_id: string;
+            /** Amount */
+            amount: number | string;
+            /** Reason */
+            reason?: string | null;
+        };
+        /** BulkMonthlyGrantBody */
+        BulkMonthlyGrantBody: {
+            /** Group Id */
+            group_id: string;
+            /** Amount */
+            amount: number | string;
+        };
         /** BulkTerminateRequest */
         BulkTerminateRequest: {
             /** Session Ids */
@@ -2594,12 +3306,37 @@ export interface components {
             /** Reason */
             reason?: string | null;
         };
+        /** BulkUserCreate */
+        BulkUserCreate: {
+            /** Group Id */
+            group_id: string;
+            /**
+             * Initial Role
+             * @default member
+             */
+            initial_role: string;
+            /** Rows */
+            rows: components["schemas"]["BulkUserRow"][];
+        };
+        /** BulkUserRow */
+        BulkUserRow: {
+            /** Email */
+            email: string;
+            /** Name */
+            name: string;
+        };
         /** ChangePasswordRequest */
         ChangePasswordRequest: {
             /** Current Password */
             current_password?: string | null;
             /** New Password */
             new_password: string;
+        };
+        /** ClusterCompute */
+        ClusterCompute: {
+            cpu: components["schemas"]["ClusterResource"];
+            mem_gb: components["schemas"]["ClusterResource"];
+            disk_gb: components["schemas"]["ClusterResource"];
         };
         /** ClusterCredit */
         ClusterCredit: {
@@ -2640,6 +3377,8 @@ export interface components {
             gpu: components["schemas"]["ClusterGpu"];
             sessions: components["schemas"]["ClusterSessions"];
             credit: components["schemas"]["ClusterCredit"];
+            compute: components["schemas"]["ClusterCompute"];
+            storage?: components["schemas"]["ClusterStorage"] | null;
         };
         /** ClusterNodes */
         ClusterNodes: {
@@ -2694,12 +3433,38 @@ export interface components {
             /** Kubeconfig B64 */
             kubeconfig_b64: string;
         };
+        /**
+         * ClusterResource
+         * @description One host-compute dimension fleet-wide: promised to active sessions vs node capacity.
+         */
+        ClusterResource: {
+            /** Used */
+            used: number;
+            /** Total */
+            total: number;
+        };
         /** ClusterSessions */
         ClusterSessions: {
             /** Running */
             running: number;
             /** Queued */
             queued: number;
+        };
+        /** ClusterStorage */
+        ClusterStorage: {
+            disk_gb: components["schemas"]["ClusterStorageDisk"];
+            /**
+             * Node Count
+             * @default 0
+             */
+            node_count: number;
+        };
+        /** ClusterStorageDisk */
+        ClusterStorageDisk: {
+            /** Used */
+            used: number;
+            /** Total */
+            total: number;
         };
         /** ConnectionInfo */
         ConnectionInfo: {
@@ -2717,7 +3482,18 @@ export interface components {
         /** DashboardAllocation */
         DashboardAllocation: {
             instances: components["schemas"]["DashboardInstances"];
-            vram: components["schemas"]["DashboardVram"];
+            vram: components["schemas"]["MyVram"];
+            gpu_cores?: components["schemas"]["ResourceUsage"] | null;
+        };
+        /**
+         * DashboardCompute
+         * @description Host compute held by the caller's active sessions — separate from GPU/credits, since
+         *     cpu/mem/disk are quota-governed, not billed.
+         */
+        DashboardCompute: {
+            cpu: components["schemas"]["ResourceUsage"];
+            mem_gb: components["schemas"]["ResourceUsage"];
+            disk_gb: components["schemas"]["ResourceUsage"];
         };
         /**
          * DashboardCredit
@@ -2739,8 +3515,26 @@ export interface components {
             total: number;
         };
         /**
+         * DashboardPool
+         * @description A node pool the caller may place on. `id` is None for the unassigned ("shared") bucket.
+         */
+        DashboardPool: {
+            /** Id */
+            id?: string | null;
+            /** Name */
+            name: string;
+            /** Kind */
+            kind: string;
+            /** Tier */
+            tier: string;
+        };
+        /**
          * DashboardRegion
          * @description Per-GPU-model availability bucket.
+         *
+         *     `free`/`total` count whole cards, which under fractional sharing understates what is usable: a
+         *     card holding one small slice is not "free" yet can still host several more sessions. The VRAM
+         *     figures are what actually decide whether a session starts, so both are reported.
          */
         DashboardRegion: {
             /** Model */
@@ -2749,6 +3543,16 @@ export interface components {
             total: number;
             /** Free */
             free: number;
+            /**
+             * Free Mb
+             * @default 0
+             */
+            free_mb: number;
+            /**
+             * Total Mb
+             * @default 0
+             */
+            total_mb: number;
         };
         /** DashboardSessions */
         DashboardSessions: {
@@ -2767,7 +3571,13 @@ export interface components {
             vram: components["schemas"]["DashboardVram"];
             /** Regions */
             regions: components["schemas"]["DashboardRegion"][];
+            /**
+             * Pools
+             * @default []
+             */
+            pools: components["schemas"]["DashboardPool"][];
             allocation: components["schemas"]["DashboardAllocation"];
+            compute: components["schemas"]["DashboardCompute"];
         };
         /** DashboardVram */
         DashboardVram: {
@@ -2775,6 +3585,14 @@ export interface components {
             used_mb: number;
             /** Total Mb */
             total_mb: number;
+        };
+        /**
+         * ForceTerminateBody
+         * @description Admin's justification — recorded verbatim in the audit log (the console requires it).
+         */
+        ForceTerminateBody: {
+            /** Reason */
+            reason?: string | null;
         };
         /** GlobalRoleSet */
         GlobalRoleSet: {
@@ -2790,6 +3608,11 @@ export interface components {
             /** Total */
             total: number;
         };
+        /** GpuDeviceModeSet */
+        GpuDeviceModeSet: {
+            /** Desired Mode */
+            desired_mode?: string | null;
+        };
         /** GpuDeviceRow */
         GpuDeviceRow: {
             /** Id */
@@ -2800,6 +3623,13 @@ export interface components {
             model: string;
             /** Mode */
             mode: string;
+            /** Desired Mode */
+            desired_mode?: string | null;
+            /**
+             * Mode State
+             * @default ready
+             */
+            mode_state: string;
             /** Status */
             status: string;
             /** Gpu Uuid */
@@ -2842,14 +3672,24 @@ export interface components {
             id: string;
             /** Group Id */
             group_id?: string | null;
+            /** Owner User Id */
+            owner_user_id?: string | null;
+            /** Name */
+            name?: string | null;
             /** Source */
             source: string;
             /** Status */
             status: string;
+            /** Error */
+            error?: string | null;
             /** Image Ref */
             image_ref?: string | null;
+            /** Image Id */
+            image_id?: string | null;
             /** Created At */
             created_at?: string | null;
+            /** Started At */
+            started_at?: string | null;
             /** Finished At */
             finished_at?: string | null;
         };
@@ -2930,6 +3770,8 @@ export interface components {
              * @default true
              */
             public: boolean;
+            /** Owner User Id */
+            owner_user_id?: string | null;
             /** Created At */
             created_at?: string | null;
             /** Import Status */
@@ -2941,10 +3783,24 @@ export interface components {
             name?: string | null;
             /** Public */
             public?: boolean | null;
+            /** Registry */
+            registry?: string | null;
             /** Cuda Version */
             cuda_version?: string | null;
             /** Supported Gpus */
             supported_gpus?: string[] | null;
+        };
+        /** InquiryCreate */
+        InquiryCreate: {
+            /** Title */
+            title: string;
+            /** Body */
+            body: string;
+            /**
+             * To
+             * @default group
+             */
+            to: string;
         };
         /**
          * MeMembership
@@ -2961,6 +3817,11 @@ export interface components {
             org_name?: string | null;
             /** Role */
             role: string;
+            /**
+             * Has Group Admin
+             * @default true
+             */
+            has_group_admin: boolean;
         };
         /**
          * MeResponse
@@ -3011,12 +3872,27 @@ export interface components {
             /** Amount */
             amount: number | string;
         };
+        /**
+         * MyVram
+         * @description The caller's own VRAM footprint vs their policy limit (None = unlimited).
+         */
+        MyVram: {
+            /** Used Mb */
+            used_mb: number;
+            /** Limit Mb */
+            limit_mb?: number | null;
+        };
         /** NodeList */
         NodeList: {
             /** Data */
             data: components["schemas"]["NodeRow"][];
             /** Total */
             total: number;
+        };
+        /** NodePoolSet */
+        NodePoolSet: {
+            /** Pool Id */
+            pool_id?: string | null;
         };
         /** NodeRow */
         NodeRow: {
@@ -3034,14 +3910,85 @@ export interface components {
             cpu: number;
             /** Mem Gb */
             mem_gb: number;
+            /**
+             * Disk Gb
+             * @default 0
+             */
+            disk_gb: number;
+            /** Role */
+            role?: string | null;
             /** Region */
             region: string;
             /** Gpu Mode */
             gpu_mode: string;
+            /**
+             * Mode Counts
+             * @default {}
+             */
+            mode_counts: {
+                [key: string]: number;
+            };
             /** Device Count */
             device_count: number;
+            /**
+             * Alloc Cpu
+             * @default 0
+             */
+            alloc_cpu: number;
+            /**
+             * Alloc Mem Gb
+             * @default 0
+             */
+            alloc_mem_gb: number;
+            /**
+             * Alloc Disk Gb
+             * @default 0
+             */
+            alloc_disk_gb: number;
+            /**
+             * Running Sessions
+             * @default 0
+             */
+            running_sessions: number;
             /** Heartbeat At */
             heartbeat_at?: string | null;
+            /** Pool Id */
+            pool_id?: string | null;
+            /** Pool Name */
+            pool_name?: string | null;
+        };
+        /** NoticeCreate */
+        NoticeCreate: {
+            /** Scope */
+            scope: string;
+            /** Group Id */
+            group_id?: string | null;
+            /** Title */
+            title: string;
+            /**
+             * Body
+             * @default
+             */
+            body: string;
+            /**
+             * Pinned
+             * @default false
+             */
+            pinned: boolean;
+            /**
+             * Notify
+             * @default true
+             */
+            notify: boolean;
+        };
+        /** NoticePatch */
+        NoticePatch: {
+            /** Title */
+            title?: string | null;
+            /** Body */
+            body?: string | null;
+            /** Pinned */
+            pinned?: boolean | null;
         };
         /** OfferingCreate */
         OfferingCreate: {
@@ -3221,6 +4168,22 @@ export interface components {
              * @default false
              */
             lossless_capable: boolean;
+            /** Role */
+            role?: string | null;
+        };
+        /**
+         * OperatorSessionDisk
+         * @description Ephemeral (scratch) disk usage of one session pod, read from kubelet /stats/summary.
+         *
+         *     ``name`` is the GShareSession CR name — the sanitized session id (``ses-01abc...``).
+         */
+        OperatorSessionDisk: {
+            /** Name */
+            name: string;
+            /** Ephemeral Used Bytes */
+            ephemeral_used_bytes: number;
+            /** Ephemeral Limit Bytes */
+            ephemeral_limit_bytes: number;
         };
         /**
          * OperatorStatusEvent
@@ -3231,6 +4194,8 @@ export interface components {
             phase: string;
             /** Bound Gpu Uuid */
             bound_gpu_uuid?: string | null;
+            /** Node Name */
+            node_name?: string | null;
             /** Yield State */
             yield_state?: string | null;
             /** Pod Ref */
@@ -3247,6 +4212,43 @@ export interface components {
              */
             ts: string;
         };
+        /**
+         * OperatorVolumeObserved
+         * @description One PVC the operator sees in the session namespace (label gshare.io/volume).
+         */
+        OperatorVolumeObserved: {
+            /** Name */
+            name: string;
+            /** Volume Id */
+            volume_id?: string | null;
+            /**
+             * Capacity Gb
+             * @default 0
+             */
+            capacity_gb: number;
+            /** Used Bytes */
+            used_bytes?: number | null;
+            /**
+             * Mounted
+             * @default false
+             */
+            mounted: boolean;
+        };
+        /**
+         * OperatorVolumeSync
+         * @description POST /internal/volumes/sync — the operator's periodic view of every session-volume PVC.
+         */
+        OperatorVolumeSync: {
+            /** Volumes */
+            volumes: components["schemas"]["OperatorVolumeObserved"][];
+            /** Cluster Id */
+            cluster_id?: string | null;
+            /**
+             * Sessions
+             * @default []
+             */
+            sessions: components["schemas"]["OperatorSessionDisk"][];
+        };
         /** OrgAdminCreate */
         OrgAdminCreate: {
             /** User Id */
@@ -3258,6 +4260,11 @@ export interface components {
             name: string;
             /** Status */
             status?: string | null;
+            /**
+             * Create Node Pool
+             * @default false
+             */
+            create_node_pool: boolean;
         };
         /** OrgUpdate */
         OrgUpdate: {
@@ -3358,6 +4365,93 @@ export interface components {
             limits?: {
                 [key: string]: unknown;
             } | null;
+        };
+        /** PoolCreate */
+        PoolCreate: {
+            /** Cluster Id */
+            cluster_id: string;
+            /** Name */
+            name: string;
+            /** Description */
+            description?: string | null;
+            /**
+             * Kind
+             * @default dedicated
+             */
+            kind: string;
+        };
+        /** PoolGrantCreate */
+        PoolGrantCreate: {
+            /** Scope */
+            scope: string;
+            /** Scope Id */
+            scope_id: string;
+        };
+        /** PoolGrantRead */
+        PoolGrantRead: {
+            /** Id */
+            id: string;
+            /** Scope */
+            scope: string;
+            /** Scope Id */
+            scope_id: string;
+            /** Name */
+            name?: string | null;
+            /** Created At */
+            created_at?: string | null;
+        };
+        /** PoolList */
+        PoolList: {
+            /** Data */
+            data: components["schemas"]["PoolRead"][];
+            /** Total */
+            total: number;
+        };
+        /** PoolNodeRow */
+        PoolNodeRow: {
+            /** Id */
+            id: string;
+            /** Hostname */
+            hostname: string;
+            /** Status */
+            status: string;
+            /** Device Count */
+            device_count: number;
+        };
+        /** PoolRead */
+        PoolRead: {
+            /** Id */
+            id: string;
+            /** Cluster Id */
+            cluster_id: string;
+            /** Cluster Name */
+            cluster_name?: string | null;
+            /** Name */
+            name: string;
+            /** Description */
+            description?: string | null;
+            /** Kind */
+            kind: string;
+            /** Node Count */
+            node_count: number;
+            /** Nodes */
+            nodes: components["schemas"]["PoolNodeRow"][];
+            /** Grants */
+            grants: components["schemas"]["PoolGrantRead"][];
+        };
+        /** PoolTargetsBody */
+        PoolTargetsBody: {
+            /** Mig Cards */
+            mig_cards: number;
+        };
+        /** PoolUpdate */
+        PoolUpdate: {
+            /** Name */
+            name?: string | null;
+            /** Description */
+            description?: string | null;
+            /** Kind */
+            kind?: string | null;
         };
         /** PresetCreate */
         PresetCreate: {
@@ -3469,6 +4563,13 @@ export interface components {
              * @default true
              */
             create_project_wallet: boolean;
+            /** Default Member Credit */
+            default_member_credit?: string | null;
+            /**
+             * Create Node Pool
+             * @default false
+             */
+            create_node_pool: boolean;
         };
         /** ProjectPatch */
         ProjectPatch: {
@@ -3476,6 +4577,8 @@ export interface components {
             name?: string | null;
             /** Status */
             status?: string | null;
+            /** Default Member Credit */
+            default_member_credit?: string | null;
         };
         /**
          * QueueEntryView
@@ -3500,6 +4603,8 @@ export interface components {
             };
             /** Enqueued At */
             enqueued_at?: string | null;
+            /** Eta Minutes */
+            eta_minutes?: number | null;
         };
         /**
          * QueueList
@@ -3523,10 +4628,50 @@ export interface components {
             /** Priority */
             priority: number;
         };
-        /** QuotaRequestBody */
-        QuotaRequestBody: {
-            /** Requested Gb */
-            requested_gb: number;
+        /** RefillScheduleBody */
+        RefillScheduleBody: {
+            /** Day */
+            day: number;
+            /** Hour */
+            hour: number;
+        };
+        /** ReplyCreate */
+        ReplyCreate: {
+            /** Body */
+            body: string;
+            /**
+             * Close
+             * @default false
+             */
+            close: boolean;
+        };
+        /** ResourceRequestCreate */
+        ResourceRequestCreate: {
+            /** Group Id */
+            group_id?: string | null;
+            /** Cpu */
+            cpu?: number | null;
+            /** Mem Gb */
+            mem_gb?: number | null;
+            /** Storage Gb */
+            storage_gb?: number | null;
+            /** Gpu Mem Mb */
+            gpu_mem_mb?: number | null;
+            /** Gpu Cores */
+            gpu_cores?: number | null;
+            /** Note */
+            note: string;
+        };
+        /**
+         * ResourceUsage
+         * @description One compute dimension: what the caller's active sessions hold vs the policy limit
+         *     (None = no limit configured).
+         */
+        ResourceUsage: {
+            /** Used */
+            used: number;
+            /** Limit */
+            limit?: number | null;
         };
         /** SessionCreate */
         SessionCreate: {
@@ -3577,6 +4722,24 @@ export interface components {
              */
             volume_mounts: components["schemas"]["VolumeMountSpec"][];
         };
+        /**
+         * SessionMountRead
+         * @description One mounted volume, joined with its display facts for the detail screens.
+         */
+        SessionMountRead: {
+            /** Volume Id */
+            volume_id: string;
+            /** Name */
+            name?: string | null;
+            /** Type */
+            type?: string | null;
+            /** Quota Gb */
+            quota_gb?: number | null;
+            /** Mount Path */
+            mount_path: string;
+            /** Mode */
+            mode: string;
+        };
         /** SessionRead */
         SessionRead: {
             /** Id */
@@ -3585,10 +4748,16 @@ export interface components {
             name?: string | null;
             /** Status */
             status: string;
+            /** Status Reason */
+            status_reason?: string | null;
             /** Occupancy */
             occupancy?: number | null;
             /** Bound Gpu Uuid */
             bound_gpu_uuid?: string | null;
+            /** Node Hostname */
+            node_hostname?: string | null;
+            /** Node Id */
+            node_id?: string | null;
             /** Cluster Id */
             cluster_id: string;
             /** Group Id */
@@ -3607,6 +4776,23 @@ export interface components {
             gpu_mem_mb?: number | null;
             /** Gpu Cores */
             gpu_cores?: number | null;
+            /** Cpu */
+            cpu?: number | null;
+            /** Mem Gb */
+            mem_gb?: number | null;
+            /** Disk Gb */
+            disk_gb?: number | null;
+            /** Gpu Model */
+            gpu_model?: string | null;
+            /** Disk Used Bytes */
+            disk_used_bytes?: number | null;
+            /** Disk Limit Bytes */
+            disk_limit_bytes?: number | null;
+            /**
+             * Mounts
+             * @default []
+             */
+            mounts: components["schemas"]["SessionMountRead"][];
             /** Owner User Id */
             owner_user_id?: string | null;
             /** Owner Name */
@@ -3619,6 +4805,18 @@ export interface components {
             terminated_at?: string | null;
             /** Created At */
             created_at?: string | null;
+            /** Status Changed At */
+            status_changed_at?: string | null;
+        };
+        /**
+         * SpendDayRead
+         * @description One day of spend (consume + storage), for the wallet's usage chart.
+         */
+        SpendDayRead: {
+            /** Date */
+            date: string;
+            /** Amount */
+            amount: number;
         };
         /** TopupRejectBody */
         TopupRejectBody: {
@@ -3653,6 +4851,14 @@ export interface components {
             requester_id?: string | null;
             /** Requester Name */
             requester_name?: string | null;
+            /** Note */
+            note?: string | null;
+            /** Wallet Owner Type */
+            wallet_owner_type?: string | null;
+            /** Wallet Owner Name */
+            wallet_owner_name?: string | null;
+            /** Decided Reason */
+            decided_reason?: string | null;
             /** Decided By */
             decided_by?: string | null;
             /** Created At */
@@ -3670,6 +4876,29 @@ export interface components {
             balance_after: string;
             /** Ref */
             ref?: string | null;
+            /** Ref Name */
+            ref_name?: string | null;
+            /** Created At */
+            created_at?: string | null;
+            /**
+             * Entry Count
+             * @default 1
+             */
+            entry_count: number;
+            /** Period Start */
+            period_start?: string | null;
+            /** Period End */
+            period_end?: string | null;
+            /**
+             * Settled
+             * @default false
+             */
+            settled: boolean;
+            /**
+             * Live
+             * @default false
+             */
+            live: boolean;
         };
         /** TransferBody */
         TransferBody: {
@@ -3755,6 +4984,17 @@ export interface components {
              */
             mode: string;
         };
+        /**
+         * VolumePatch
+         * @description Owner-side edits. The quota is self-service in both directions (bounded below by usage and
+         *     above by the scope's storage policy on the server).
+         */
+        VolumePatch: {
+            /** Quota Gb */
+            quota_gb?: number | null;
+            /** Access Mode */
+            access_mode?: string | null;
+        };
         /** VolumeRead */
         VolumeRead: {
             /** Id */
@@ -3775,6 +5015,46 @@ export interface components {
             used_gb: number;
             /** Role */
             role?: string | null;
+            /** Owner Id */
+            owner_id?: string | null;
+            /** Owner Name */
+            owner_name?: string | null;
+            /**
+             * Shared Count
+             * @default 0
+             */
+            shared_count: number;
+            /** Active Mounts */
+            active_mounts?: {
+                [key: string]: unknown;
+            }[] | null;
+        };
+        /**
+         * VolumeSyncDirective
+         * @description What the control plane wants for one observed PVC.
+         */
+        VolumeSyncDirective: {
+            /** Name */
+            name: string;
+            /** Volume Id */
+            volume_id?: string | null;
+            /** Quota Gb */
+            quota_gb?: number | null;
+            /**
+             * Reclaim
+             * @default false
+             */
+            reclaim: boolean;
+        };
+        /** VolumeSyncResponse */
+        VolumeSyncResponse: {
+            /** Volumes */
+            volumes: components["schemas"]["VolumeSyncDirective"][];
+            /**
+             * Orphans
+             * @default 0
+             */
+            orphans: number;
         };
         /** WalletRead */
         WalletRead: {
@@ -3846,14 +5126,17 @@ export interface components {
             hostname: string;
             /** Region */
             region?: string | null;
-            /** Gpu Mode */
-            gpu_mode?: string | null;
             /** Cpu */
             cpu?: number | null;
             /** Mem Gb */
             mem_gb?: number | null;
             /** Cluster Id */
             cluster_id?: string | null;
+        };
+        /** _RRReject */
+        _RRReject: {
+            /** Reason */
+            reason: string;
         };
     };
     responses: never;
@@ -3977,6 +5260,7 @@ export interface operations {
                 status?: string | null;
                 q?: string | null;
                 org_id?: string | null;
+                group_id?: string | null;
                 page?: number;
                 size?: number;
                 /** @description Token fallback for clients that cannot set custom headers, such as EventSource (SSE) */
@@ -4032,6 +5316,82 @@ export interface operations {
         responses: {
             /** @description Successful Response */
             201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    bulk_create_users_api_v1_users_bulk_post: {
+        parameters: {
+            query?: {
+                /** @description Token fallback for clients that cannot set custom headers, such as EventSource (SSE) */
+                access_token?: string | null;
+            };
+            header?: {
+                /** @description Bearer <jwt> */
+                authorization?: string | null;
+                "Idempotency-Key"?: string | null;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["BulkUserCreate"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            207: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    resolve_user_api_v1_users_resolve_get: {
+        parameters: {
+            query: {
+                email: string;
+                /** @description Token fallback for clients that cannot set custom headers, such as EventSource (SSE) */
+                access_token?: string | null;
+            };
+            header?: {
+                /** @description Bearer <jwt> */
+                authorization?: string | null;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -4143,6 +5503,43 @@ export interface operations {
                 "application/json": components["schemas"]["UserPatch"];
             };
         };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_user_usage_api_v1_users__user_id__usage_get: {
+        parameters: {
+            query?: {
+                /** @description Token fallback for clients that cannot set custom headers, such as EventSource (SSE) */
+                access_token?: string | null;
+            };
+            header?: {
+                /** @description Bearer <jwt> */
+                authorization?: string | null;
+            };
+            path: {
+                user_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
         responses: {
             /** @description Successful Response */
             200: {
@@ -5168,6 +6565,80 @@ export interface operations {
             };
         };
     };
+    get_refill_schedule_api_v1_credits_refill_schedule_get: {
+        parameters: {
+            query?: {
+                /** @description Token fallback for clients that cannot set custom headers, such as EventSource (SSE) */
+                access_token?: string | null;
+            };
+            header?: {
+                /** @description Bearer <jwt> */
+                authorization?: string | null;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    set_refill_schedule_api_v1_credits_refill_schedule_put: {
+        parameters: {
+            query?: {
+                /** @description Token fallback for clients that cannot set custom headers, such as EventSource (SSE) */
+                access_token?: string | null;
+            };
+            header?: {
+                /** @description Bearer <jwt> */
+                authorization?: string | null;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["RefillScheduleBody"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     allocate_api_v1_credits_allocate_post: {
         parameters: {
             query?: {
@@ -5236,6 +6707,85 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["WalletRead"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    bulk_allocate_api_v1_credits_bulk_allocate_post: {
+        parameters: {
+            query?: {
+                /** @description Token fallback for clients that cannot set custom headers, such as EventSource (SSE) */
+                access_token?: string | null;
+            };
+            header?: {
+                /** @description Bearer <jwt> */
+                authorization?: string | null;
+                "Idempotency-Key"?: string | null;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["BulkAllocateBody"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    bulk_monthly_grant_api_v1_credits_bulk_monthly_grant_post: {
+        parameters: {
+            query?: {
+                /** @description Token fallback for clients that cannot set custom headers, such as EventSource (SSE) */
+                access_token?: string | null;
+            };
+            header?: {
+                /** @description Bearer <jwt> */
+                authorization?: string | null;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["BulkMonthlyGrantBody"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
                 };
             };
             /** @description Validation Error */
@@ -5405,9 +6955,12 @@ export interface operations {
             };
         };
     };
-    escalate_allocation_request_api_v1_credits_allocation_requests__request_id__escalate_post: {
+    spend_daily_api_v1_credits_wallets__wallet_id__spend_daily_get: {
         parameters: {
-            query?: {
+            query: {
+                from: string;
+                to: string;
+                tz_offset_min?: number;
                 /** @description Token fallback for clients that cannot set custom headers, such as EventSource (SSE) */
                 access_token?: string | null;
             };
@@ -5416,23 +6969,19 @@ export interface operations {
                 authorization?: string | null;
             };
             path: {
-                request_id: string;
+                wallet_id: string;
             };
             cookie?: never;
         };
-        requestBody: {
-            content: {
-                "application/json": components["schemas"]["AllocationEscalateBody"];
-            };
-        };
+        requestBody?: never;
         responses: {
             /** @description Successful Response */
-            201: {
+            200: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": unknown;
+                    "application/json": components["schemas"]["SpendDayRead"][];
                 };
             };
             /** @description Validation Error */
@@ -5449,6 +6998,7 @@ export interface operations {
     transactions_api_v1_credits_wallets__wallet_id__transactions_get: {
         parameters: {
             query?: {
+                group?: string;
                 page?: number;
                 size?: number;
                 /** @description Token fallback for clients that cannot set custom headers, such as EventSource (SSE) */
@@ -5527,6 +7077,7 @@ export interface operations {
             query?: {
                 status?: string | null;
                 wallet_id?: string | null;
+                scope?: string;
                 page?: number;
                 size?: number;
                 /** @description Token fallback for clients that cannot set custom headers, such as EventSource (SSE) */
@@ -6448,6 +7999,159 @@ export interface operations {
             };
         };
     };
+    list_resource_requests_api_v1_resource_policies_requests_get: {
+        parameters: {
+            query?: {
+                box?: string;
+                /** @description Token fallback for clients that cannot set custom headers, such as EventSource (SSE) */
+                access_token?: string | null;
+            };
+            header?: {
+                /** @description Bearer <jwt> */
+                authorization?: string | null;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    create_resource_request_api_v1_resource_policies_requests_post: {
+        parameters: {
+            query?: {
+                /** @description Token fallback for clients that cannot set custom headers, such as EventSource (SSE) */
+                access_token?: string | null;
+            };
+            header?: {
+                /** @description Bearer <jwt> */
+                authorization?: string | null;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ResourceRequestCreate"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    approve_resource_request_api_v1_resource_policies_requests__request_id__approve_post: {
+        parameters: {
+            query?: {
+                /** @description Token fallback for clients that cannot set custom headers, such as EventSource (SSE) */
+                access_token?: string | null;
+            };
+            header?: {
+                /** @description Bearer <jwt> */
+                authorization?: string | null;
+            };
+            path: {
+                request_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    reject_resource_request_api_v1_resource_policies_requests__request_id__reject_post: {
+        parameters: {
+            query?: {
+                /** @description Token fallback for clients that cannot set custom headers, such as EventSource (SSE) */
+                access_token?: string | null;
+            };
+            header?: {
+                /** @description Bearer <jwt> */
+                authorization?: string | null;
+            };
+            path: {
+                request_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["_RRReject"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     get_policy_api_v1_resource_policies__policy_id__get: {
         parameters: {
             query?: {
@@ -6626,7 +8330,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["SessionRead"][];
+                    "application/json": unknown;
                 };
             };
             /** @description Validation Error */
@@ -6718,6 +8422,7 @@ export interface operations {
     gpu_availability_api_v1_sessions_gpu_availability_get: {
         parameters: {
             query?: {
+                fleet?: boolean;
                 /** @description Token fallback for clients that cannot set custom headers, such as EventSource (SSE) */
                 access_token?: string | null;
             };
@@ -6950,7 +8655,11 @@ export interface operations {
             };
             cookie?: never;
         };
-        requestBody?: never;
+        requestBody?: {
+            content: {
+                "application/json": components["schemas"]["ForceTerminateBody"] | null;
+            };
+        };
         responses: {
             /** @description Successful Response */
             202: {
@@ -7053,6 +8762,7 @@ export interface operations {
     session_connections_api_v1_sessions__session_id__connections_get: {
         parameters: {
             query?: {
+                kind?: string | null;
                 /** @description Token fallback for clients that cannot set custom headers, such as EventSource (SSE) */
                 access_token?: string | null;
             };
@@ -7074,6 +8784,118 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["ConnectionInfo"][];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    session_usage_self_api_v1_sessions__session_id__usage_get: {
+        parameters: {
+            query?: {
+                /** @description Token fallback for clients that cannot set custom headers, such as EventSource (SSE) */
+                access_token?: string | null;
+            };
+            header?: {
+                /** @description Bearer <jwt> */
+                authorization?: string | null;
+            };
+            path: {
+                session_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    session_usage_series_self_api_v1_sessions__session_id__usage_timeseries_get: {
+        parameters: {
+            query?: {
+                range?: string;
+                /** @description Token fallback for clients that cannot set custom headers, such as EventSource (SSE) */
+                access_token?: string | null;
+            };
+            header?: {
+                /** @description Bearer <jwt> */
+                authorization?: string | null;
+            };
+            path: {
+                session_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    session_timeline_api_v1_sessions__session_id__timeline_get: {
+        parameters: {
+            query?: {
+                /** @description Token fallback for clients that cannot set custom headers, such as EventSource (SSE) */
+                access_token?: string | null;
+            };
+            header?: {
+                /** @description Bearer <jwt> */
+                authorization?: string | null;
+            };
+            path: {
+                session_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
                 };
             };
             /** @description Validation Error */
@@ -7394,6 +9216,7 @@ export interface operations {
                 scope_id?: string | null;
                 type?: string | null;
                 access_mode?: string | null;
+                all?: boolean;
                 page?: number;
                 size?: number;
                 /** @description Token fallback for clients that cannot set custom headers, such as EventSource (SSE) */
@@ -7472,41 +9295,6 @@ export interface operations {
             query: {
                 scope: string;
                 scope_id: string;
-                /** @description Token fallback for clients that cannot set custom headers, such as EventSource (SSE) */
-                access_token?: string | null;
-            };
-            header?: {
-                /** @description Bearer <jwt> */
-                authorization?: string | null;
-            };
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": unknown;
-                };
-            };
-            /** @description Validation Error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
-                };
-            };
-        };
-    };
-    volume_pricing_api_v1_storage_volumes_pricing_get: {
-        parameters: {
-            query?: {
                 /** @description Token fallback for clients that cannot set custom headers, such as EventSource (SSE) */
                 access_token?: string | null;
             };
@@ -7629,9 +9417,7 @@ export interface operations {
         };
         requestBody: {
             content: {
-                "application/json": {
-                    [key: string]: unknown;
-                };
+                "application/json": components["schemas"]["VolumePatch"];
             };
         };
         responses: {
@@ -7839,169 +9625,6 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content?: never;
-            };
-            /** @description Validation Error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
-                };
-            };
-        };
-    };
-    list_quota_requests_api_v1_storage_volumes__volume_id__quota_requests_get: {
-        parameters: {
-            query?: {
-                status?: string | null;
-                page?: number;
-                size?: number;
-                /** @description Token fallback for clients that cannot set custom headers, such as EventSource (SSE) */
-                access_token?: string | null;
-            };
-            header?: {
-                /** @description Bearer <jwt> */
-                authorization?: string | null;
-            };
-            path: {
-                volume_id: string;
-            };
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": unknown;
-                };
-            };
-            /** @description Validation Error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
-                };
-            };
-        };
-    };
-    create_quota_request_api_v1_storage_volumes__volume_id__quota_requests_post: {
-        parameters: {
-            query?: {
-                /** @description Token fallback for clients that cannot set custom headers, such as EventSource (SSE) */
-                access_token?: string | null;
-            };
-            header?: {
-                /** @description Bearer <jwt> */
-                authorization?: string | null;
-            };
-            path: {
-                volume_id: string;
-            };
-            cookie?: never;
-        };
-        requestBody: {
-            content: {
-                "application/json": components["schemas"]["QuotaRequestBody"];
-            };
-        };
-        responses: {
-            /** @description Successful Response */
-            201: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": unknown;
-                };
-            };
-            /** @description Validation Error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
-                };
-            };
-        };
-    };
-    approve_quota_request_api_v1_storage_volumes__volume_id__quota_requests__request_id__approve_post: {
-        parameters: {
-            query?: {
-                /** @description Token fallback for clients that cannot set custom headers, such as EventSource (SSE) */
-                access_token?: string | null;
-            };
-            header?: {
-                /** @description Bearer <jwt> */
-                authorization?: string | null;
-            };
-            path: {
-                volume_id: string;
-                request_id: string;
-            };
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": unknown;
-                };
-            };
-            /** @description Validation Error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
-                };
-            };
-        };
-    };
-    reject_quota_request_api_v1_storage_volumes__volume_id__quota_requests__request_id__reject_post: {
-        parameters: {
-            query?: {
-                /** @description Token fallback for clients that cannot set custom headers, such as EventSource (SSE) */
-                access_token?: string | null;
-            };
-            header?: {
-                /** @description Bearer <jwt> */
-                authorization?: string | null;
-            };
-            path: {
-                volume_id: string;
-                request_id: string;
-            };
-            cookie?: never;
-        };
-        requestBody?: {
-            content: {
-                "application/json": {
-                    [key: string]: unknown;
-                } | null;
-            };
-        };
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": unknown;
-                };
             };
             /** @description Validation Error */
             422: {
@@ -8412,6 +10035,7 @@ export interface operations {
                 q?: string | null;
                 tag?: string | null;
                 public?: boolean | null;
+                mine?: boolean;
                 page?: number;
                 size?: number;
                 /** @description Token fallback for clients that cannot set custom headers, such as EventSource (SSE) */
@@ -8510,6 +10134,41 @@ export interface operations {
                 content: {
                     "application/json": unknown;
                 };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    delete_image_api_v1_images__image_id__delete: {
+        parameters: {
+            query?: {
+                /** @description Token fallback for clients that cannot set custom headers, such as EventSource (SSE) */
+                access_token?: string | null;
+            };
+            header?: {
+                /** @description Bearer <jwt> */
+                authorization?: string | null;
+            };
+            path: {
+                image_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
             };
             /** @description Validation Error */
             422: {
@@ -8795,9 +10454,45 @@ export interface operations {
         parameters: {
             query?: {
                 unread?: boolean;
+                include_deleted?: boolean;
                 type?: string[] | null;
                 page?: number;
                 size?: number;
+                /** @description Token fallback for clients that cannot set custom headers, such as EventSource (SSE) */
+                access_token?: string | null;
+            };
+            header?: {
+                /** @description Bearer <jwt> */
+                authorization?: string | null;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    delete_all_notifications_api_v1_notifications_delete: {
+        parameters: {
+            query?: {
                 /** @description Token fallback for clients that cannot set custom headers, such as EventSource (SSE) */
                 access_token?: string | null;
             };
@@ -8867,6 +10562,41 @@ export interface operations {
             };
         };
     };
+    delete_notification_api_v1_notifications__notification_id__delete: {
+        parameters: {
+            query?: {
+                /** @description Token fallback for clients that cannot set custom headers, such as EventSource (SSE) */
+                access_token?: string | null;
+            };
+            header?: {
+                /** @description Bearer <jwt> */
+                authorization?: string | null;
+            };
+            path: {
+                notification_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     mark_all_read_api_v1_notifications_read_all_post: {
         parameters: {
             query?: {
@@ -8888,6 +10618,386 @@ export interface operations {
                 } | null;
             };
         };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    list_notices_api_v1_notices_get: {
+        parameters: {
+            query?: {
+                all?: boolean;
+                page?: number;
+                size?: number;
+                /** @description Token fallback for clients that cannot set custom headers, such as EventSource (SSE) */
+                access_token?: string | null;
+            };
+            header?: {
+                /** @description Bearer <jwt> */
+                authorization?: string | null;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    create_notice_api_v1_notices_post: {
+        parameters: {
+            query?: {
+                /** @description Token fallback for clients that cannot set custom headers, such as EventSource (SSE) */
+                access_token?: string | null;
+            };
+            header?: {
+                /** @description Bearer <jwt> */
+                authorization?: string | null;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["NoticeCreate"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    delete_notice_api_v1_notices__notice_id__delete: {
+        parameters: {
+            query?: {
+                /** @description Token fallback for clients that cannot set custom headers, such as EventSource (SSE) */
+                access_token?: string | null;
+            };
+            header?: {
+                /** @description Bearer <jwt> */
+                authorization?: string | null;
+            };
+            path: {
+                notice_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    update_notice_api_v1_notices__notice_id__patch: {
+        parameters: {
+            query?: {
+                /** @description Token fallback for clients that cannot set custom headers, such as EventSource (SSE) */
+                access_token?: string | null;
+            };
+            header?: {
+                /** @description Bearer <jwt> */
+                authorization?: string | null;
+            };
+            path: {
+                notice_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["NoticePatch"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    list_inquiries_api_v1_inquiries_get: {
+        parameters: {
+            query?: {
+                box?: string;
+                page?: number;
+                size?: number;
+                /** @description Token fallback for clients that cannot set custom headers, such as EventSource (SSE) */
+                access_token?: string | null;
+            };
+            header?: {
+                /** @description Bearer <jwt> */
+                authorization?: string | null;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    create_inquiry_api_v1_inquiries_post: {
+        parameters: {
+            query?: {
+                /** @description Token fallback for clients that cannot set custom headers, such as EventSource (SSE) */
+                access_token?: string | null;
+            };
+            header?: {
+                /** @description Bearer <jwt> */
+                authorization?: string | null;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["InquiryCreate"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_inquiry_api_v1_inquiries__inquiry_id__get: {
+        parameters: {
+            query?: {
+                /** @description Token fallback for clients that cannot set custom headers, such as EventSource (SSE) */
+                access_token?: string | null;
+            };
+            header?: {
+                /** @description Bearer <jwt> */
+                authorization?: string | null;
+            };
+            path: {
+                inquiry_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    delete_inquiry_api_v1_inquiries__inquiry_id__delete: {
+        parameters: {
+            query?: {
+                /** @description Token fallback for clients that cannot set custom headers, such as EventSource (SSE) */
+                access_token?: string | null;
+            };
+            header?: {
+                /** @description Bearer <jwt> */
+                authorization?: string | null;
+            };
+            path: {
+                inquiry_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    reply_inquiry_api_v1_inquiries__inquiry_id__replies_post: {
+        parameters: {
+            query?: {
+                /** @description Token fallback for clients that cannot set custom headers, such as EventSource (SSE) */
+                access_token?: string | null;
+            };
+            header?: {
+                /** @description Bearer <jwt> */
+                authorization?: string | null;
+            };
+            path: {
+                inquiry_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ReplyCreate"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    close_inquiry_api_v1_inquiries__inquiry_id__close_post: {
+        parameters: {
+            query?: {
+                /** @description Token fallback for clients that cannot set custom headers, such as EventSource (SSE) */
+                access_token?: string | null;
+            };
+            header?: {
+                /** @description Bearer <jwt> */
+                authorization?: string | null;
+            };
+            path: {
+                inquiry_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
         responses: {
             /** @description Successful Response */
             200: {
@@ -9293,6 +11403,275 @@ export interface operations {
             };
         };
     };
+    list_node_pools_api_v1_node_pools_get: {
+        parameters: {
+            query?: {
+                cluster_id?: string | null;
+                /** @description Token fallback for clients that cannot set custom headers, such as EventSource (SSE) */
+                access_token?: string | null;
+            };
+            header?: {
+                /** @description Bearer <jwt> */
+                authorization?: string | null;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PoolList"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    create_node_pool_api_v1_node_pools_post: {
+        parameters: {
+            query?: {
+                /** @description Token fallback for clients that cannot set custom headers, such as EventSource (SSE) */
+                access_token?: string | null;
+            };
+            header?: {
+                /** @description Bearer <jwt> */
+                authorization?: string | null;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["PoolCreate"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PoolRead"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    delete_node_pool_api_v1_node_pools__pool_id__delete: {
+        parameters: {
+            query?: {
+                /** @description Token fallback for clients that cannot set custom headers, such as EventSource (SSE) */
+                access_token?: string | null;
+            };
+            header?: {
+                /** @description Bearer <jwt> */
+                authorization?: string | null;
+            };
+            path: {
+                pool_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    update_node_pool_api_v1_node_pools__pool_id__patch: {
+        parameters: {
+            query?: {
+                /** @description Token fallback for clients that cannot set custom headers, such as EventSource (SSE) */
+                access_token?: string | null;
+            };
+            header?: {
+                /** @description Bearer <jwt> */
+                authorization?: string | null;
+            };
+            path: {
+                pool_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["PoolUpdate"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PoolRead"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    set_node_pool_api_v1_nodes__node_id__pool_put: {
+        parameters: {
+            query?: {
+                /** @description Token fallback for clients that cannot set custom headers, such as EventSource (SSE) */
+                access_token?: string | null;
+            };
+            header?: {
+                /** @description Bearer <jwt> */
+                authorization?: string | null;
+            };
+            path: {
+                node_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["NodePoolSet"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    grant_node_pool_api_v1_node_pools__pool_id__grants_post: {
+        parameters: {
+            query?: {
+                /** @description Token fallback for clients that cannot set custom headers, such as EventSource (SSE) */
+                access_token?: string | null;
+            };
+            header?: {
+                /** @description Bearer <jwt> */
+                authorization?: string | null;
+            };
+            path: {
+                pool_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["PoolGrantCreate"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    revoke_node_pool_grant_api_v1_node_pools__pool_id__grants__grant_id__delete: {
+        parameters: {
+            query?: {
+                /** @description Token fallback for clients that cannot set custom headers, such as EventSource (SSE) */
+                access_token?: string | null;
+            };
+            header?: {
+                /** @description Bearer <jwt> */
+                authorization?: string | null;
+            };
+            path: {
+                pool_id: string;
+                grant_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     list_gpu_devices_api_v1_gpu_devices_get: {
         parameters: {
             query?: {
@@ -9316,6 +11695,88 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["GpuDeviceList"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    set_gpu_device_mode_api_v1_gpu_devices__device_id__mode_put: {
+        parameters: {
+            query?: {
+                /** @description Token fallback for clients that cannot set custom headers, such as EventSource (SSE) */
+                access_token?: string | null;
+            };
+            header?: {
+                /** @description Bearer <jwt> */
+                authorization?: string | null;
+            };
+            path: {
+                device_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["GpuDeviceModeSet"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    set_pool_targets_api_v1_gpu_pools__cluster_id__put: {
+        parameters: {
+            query?: {
+                /** @description Token fallback for clients that cannot set custom headers, such as EventSource (SSE) */
+                access_token?: string | null;
+            };
+            header?: {
+                /** @description Bearer <jwt> */
+                authorization?: string | null;
+            };
+            path: {
+                cluster_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["PoolTargetsBody"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
                 };
             };
             /** @description Validation Error */
@@ -9406,6 +11867,228 @@ export interface operations {
             };
         };
     };
+    monitoring_status_api_v1_monitoring_status_get: {
+        parameters: {
+            query?: {
+                /** @description Token fallback for clients that cannot set custom headers, such as EventSource (SSE) */
+                access_token?: string | null;
+            };
+            header?: {
+                /** @description Bearer <jwt> */
+                authorization?: string | null;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    session_usage_api_v1_monitoring_sessions__session_id__usage_get: {
+        parameters: {
+            query?: {
+                /** @description Token fallback for clients that cannot set custom headers, such as EventSource (SSE) */
+                access_token?: string | null;
+            };
+            header?: {
+                /** @description Bearer <jwt> */
+                authorization?: string | null;
+            };
+            path: {
+                session_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    session_usage_timeseries_api_v1_monitoring_sessions__session_id__usage_timeseries_get: {
+        parameters: {
+            query?: {
+                range?: string;
+                /** @description Token fallback for clients that cannot set custom headers, such as EventSource (SSE) */
+                access_token?: string | null;
+            };
+            header?: {
+                /** @description Bearer <jwt> */
+                authorization?: string | null;
+            };
+            path: {
+                session_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    monitoring_timeseries_api_v1_monitoring_timeseries_get: {
+        parameters: {
+            query: {
+                panel: string;
+                range?: string;
+                node?: string | null;
+                gpu?: string | null;
+                /** @description Token fallback for clients that cannot set custom headers, such as EventSource (SSE) */
+                access_token?: string | null;
+            };
+            header?: {
+                /** @description Bearer <jwt> */
+                authorization?: string | null;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    monitoring_instant_api_v1_monitoring_instant_get: {
+        parameters: {
+            query: {
+                panel: string;
+                node?: string | null;
+                gpu?: string | null;
+                /** @description Token fallback for clients that cannot set custom headers, such as EventSource (SSE) */
+                access_token?: string | null;
+            };
+            header?: {
+                /** @description Bearer <jwt> */
+                authorization?: string | null;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    monitoring_gpu_inventory_api_v1_monitoring_gpu_inventory_get: {
+        parameters: {
+            query?: {
+                /** @description Token fallback for clients that cannot set custom headers, such as EventSource (SSE) */
+                access_token?: string | null;
+            };
+            header?: {
+                /** @description Bearer <jwt> */
+                authorization?: string | null;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     report_status_internal_sessions__session_id__status_post: {
         parameters: {
             query?: never;
@@ -9420,6 +12103,43 @@ export interface operations {
         requestBody: {
             content: {
                 "application/json": components["schemas"]["OperatorStatusEvent"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    report_build_status_internal_image_builds__build_id__status_post: {
+        parameters: {
+            query?: never;
+            header: {
+                authorization: string;
+            };
+            path: {
+                build_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["BuildStatusEvent"];
             };
         };
         responses: {
@@ -9667,6 +12387,41 @@ export interface operations {
                 };
                 content: {
                     "application/json": unknown;
+                };
+            };
+        };
+    };
+    sync_volumes_internal_volumes_sync_post: {
+        parameters: {
+            query?: never;
+            header: {
+                authorization: string;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["OperatorVolumeSync"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["VolumeSyncResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
                 };
             };
         };

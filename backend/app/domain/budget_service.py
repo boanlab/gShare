@@ -71,6 +71,7 @@ class BudgetService:
                 await self._notify_budget(
                     budget, "budget_exceeded", "Blocked: budget exceeded",
                     f"The session was blocked because the {budget.scope} budget limit was exceeded.",
+                    params={"scope": budget.scope},
                 )
                 raise BudgetExceeded(
                     "budget cap exceeded",
@@ -151,13 +152,16 @@ class BudgetService:
             await self._notify_budget(
                 budget, "budget_alert", f"Budget alert at {pct}%",
                 f"The {budget.scope} budget is now over {pct}% used.",
+                params={"pct": pct, "scope": budget.scope},
             )
             log.info(
                 "budget alert fired budget=%s threshold=%d%% usage=%.1f%%",
                 budget.id, pct, float(usage),
             )
 
-    async def _notify_budget(self, budget: Budget, ntype: str, title: str, body: str) -> None:
+    async def _notify_budget(
+        self, budget: Budget, ntype: str, title: str, body: str, params: dict | None = None
+    ) -> None:
         """Recipients of a budget alert or overrun: the scope's administrators (project or
         organization) plus the system and billing administrators."""
         notifier = NotificationService(self.db)
@@ -168,7 +172,7 @@ class BudgetService:
         )
         recips += await notifier.system_admins()
         await notifier.notify(
-            recips, ntype, title, body,
+            recips, ntype, title, body, params=params,
             budget_id=budget.id, scope=budget.scope, scope_id=budget.scope_id,
         )
 

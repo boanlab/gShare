@@ -13,7 +13,7 @@ the model compact.
 """
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import UTC, datetime
 from decimal import Decimal
 
 from sqlalchemy import (
@@ -25,7 +25,9 @@ from sqlalchemy import (
     Integer,
     Numeric,
     String,
+    Text,
     UniqueConstraint,
+    event,
     func,
     text,
 )
@@ -73,6 +75,8 @@ class Notification(Base, TimestampMixin):
     type: Mapped[str] = mapped_column(String)
     payload: Mapped[dict] = mapped_column(JSONB, default=dict)
     read_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), default=None)
+    # Soft delete: the bell hides dismissed rows; the my-page notification log keeps them.
+    deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), default=None)
 
 
 class Organization(Base, TimestampMixin, SoftDeleteMixin):
@@ -89,6 +93,11 @@ class Project(Base, TimestampMixin, SoftDeleteMixin):
     org_id: Mapped[str] = mapped_column(ForeignKey("organization.id"), index=True)
     name: Mapped[str] = mapped_column(String)
     status: Mapped[str] = mapped_column(String, default="active")
+    # Credits minted into a member's personal wallet the first time they join this group
+    # (welcome grant; 0 disables). Idempotent per (group, user) — re-adding never double-pays.
+    default_member_credit: Mapped[Decimal] = mapped_column(
+        Numeric(18, 2), default=Decimal("0"), server_default=text("0")
+    )
 
 
 class Membership(Base, TimestampMixin):
@@ -149,6 +158,7 @@ class TopupRequest(Base, TimestampMixin):
     requester_id: Mapped[str] = mapped_column(String)
     decided_by: Mapped[str | None] = mapped_column(String, default=None)
     decided_reason: Mapped[str | None] = mapped_column(String, default=None)  # decision note, such as the reason for a rejection
+    note: Mapped[str | None] = mapped_column(String, default=None)            # requester's justification
 
 
 class CreditAllocationRequest(Base, TimestampMixin):
@@ -232,6 +242,28 @@ class ResourcePolicy(Base, TimestampMixin):
     limits: Mapped[dict] = mapped_column(JSONB, default=dict)
 
 
+class ResourceRequest(Base, TimestampMixin):
+    """A user's ask for a bigger compute quota (cpu / mem_gb / storage_gb targets).
+
+    Approval upserts a USER-scope ResourcePolicy carrying ONLY the granted keys — the per-field
+    most-specific merge inherits everything else from group/org/global, so the base policy stays
+    the single default and per-user rows never fork the whole policy."""
+
+    __tablename__ = "resource_request"
+    id: Mapped[str] = mapped_column(String, primary_key=True)             # rrq_ULID
+    user_id: Mapped[str] = mapped_column(String, index=True)
+    group_id: Mapped[str | None] = mapped_column(String, index=True, default=None)  # approver scope
+    cpu: Mapped[int | None] = mapped_column(Integer, default=None)        # target vCPU sum
+    mem_gb: Mapped[int | None] = mapped_column(Integer, default=None)     # target GiB sum
+    storage_gb: Mapped[int | None] = mapped_column(Integer, default=None) # target GB sum
+    gpu_mem_mb: Mapped[int | None] = mapped_column(Integer, default=None)  # target VRAM MB sum
+    gpu_cores: Mapped[int | None] = mapped_column(Integer, default=None)   # target core % sum
+    note: Mapped[str] = mapped_column(String)
+    status: Mapped[str] = mapped_column(String, default="pending")        # pending|approved|rejected
+    decided_by: Mapped[str | None] = mapped_column(String, default=None)
+    decided_reason: Mapped[str | None] = mapped_column(String, default=None)
+
+
 class Image(Base, TimestampMixin):
     __tablename__ = "image"
     id: Mapped[str] = mapped_column(String, primary_key=True)            # img_ULID
@@ -241,15 +273,48 @@ class Image(Base, TimestampMixin):
     kind: Mapped[str] = mapped_column(String, default="container")       # container|iso|template
     import_status: Mapped[str | None] = mapped_column(String, default=None)  # pulling|ready|failed
     public: Mapped[bool] = mapped_column(Boolean, default=True, server_default=text("true"))  # whether the session wizard offers this image
+    # null owner = shared catalog entry; set = a user-built private image (owner + admins only)
+    owner_user_id: Mapped[str | None] = mapped_column(String, index=True, default=None)
+    # The same public ref may be imported by many members, so uniqueness is per owner. Postgres
+    # treats NULL owners as distinct rows, so shared catalogue refs need the second, partial index
+    # to stay unique among themselves.
+    __table_args__ = (
+        Index("uq_image_registry_owner", "registry", "owner_user_id", unique=True),
+        Index(
+            "uq_image_registry_shared", "registry", unique=True,
+            postgresql_where=text("owner_user_id IS NULL"),
+            sqlite_where=text("owner_user_id IS NULL"),
+        ),
+    )
 
 
 class ImageBuild(Base, TimestampMixin):
+    """A console-triggered container build.
+
+    The control plane records desired state and applies a GShareImageBuild CR; the operator runs a
+    kaniko Job and reports phase/log back via /internal/image-builds/{id}/status. On success an
+    Image row is created owned by the builder (visible only to them + admins)."""
+
     __tablename__ = "image_build"
     id: Mapped[str] = mapped_column(String, primary_key=True)            # bld_ULID
     group_id: Mapped[str] = mapped_column(ForeignKey("group.id"), index=True)
+    owner_user_id: Mapped[str | None] = mapped_column(String, index=True, default=None)
+    name: Mapped[str | None] = mapped_column(String, default=None)       # image name (repo leaf)
     source: Mapped[str] = mapped_column(String)                          # dockerfile|git
-    status: Mapped[str] = mapped_column(String, default="pending")
-    image_ref: Mapped[str | None] = mapped_column(String, default=None)
+    dockerfile: Mapped[str | None] = mapped_column(Text, default=None)
+    git_url: Mapped[str | None] = mapped_column(String, default=None)
+    git_ref: Mapped[str | None] = mapped_column(String, default=None)
+    context: Mapped[str | None] = mapped_column(String, default=None)
+    build_args: Mapped[dict | None] = mapped_column(JSONB, default=None)
+    target_tag: Mapped[str | None] = mapped_column(String, default=None)
+    cluster_id: Mapped[str | None] = mapped_column(String, default=None)
+    status: Mapped[str] = mapped_column(String, default="pending")       # queued|running|succeeded|failed|cancelled
+    error: Mapped[str | None] = mapped_column(String, default=None)
+    log_tail: Mapped[str | None] = mapped_column(Text, default=None)     # last ~16KB of kaniko log
+    image_ref: Mapped[str | None] = mapped_column(String, default=None)  # pushed ref on success
+    image_id: Mapped[str | None] = mapped_column(String, default=None)   # created Image row
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), default=None)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), default=None)
 
 
 # ── Clusters / nodes / devices ──
@@ -280,13 +345,52 @@ class GpuNode(Base, TimestampMixin):
     cluster_id: Mapped[str] = mapped_column(ForeignKey("cluster.id"), index=True)
     hostname: Mapped[str] = mapped_column(String)
     status: Mapped[str] = mapped_column(String, default="ready")         # ready|cordoned|offline
+    # Real heartbeat: stamped on EVERY operator inventory report, even when nothing changed —
+    # updated_at only moves on actual column changes and reads as a fake heartbeat.
+    last_seen_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), default=None)
     cpu: Mapped[int | None] = mapped_column(Integer, default=None)        # node CPU cores
     mem: Mapped[int | None] = mapped_column(Integer, default=None)        # node RAM in GiB
     disk: Mapped[int | None] = mapped_column(Integer, default=None)       # node ephemeral storage in GiB
+    role: Mapped[str | None] = mapped_column(String, default=None)       # master|gpu|cpu|storage (operator-derived)
     region: Mapped[str | None] = mapped_column(String, default=None)
     # Whether the lossless-pause prerequisites (cuda-checkpoint plus CRIU) are labelled ready on the
     # node; reported by the operator's inventory controller.
     lossless_capable: Mapped[bool] = mapped_column(Boolean, default=False, server_default=text("false"))
+    # Node pool membership. NULL behaves as "shared": usable by every tenant. See NodePool.
+    pool_id: Mapped[str | None] = mapped_column(
+        ForeignKey("node_pool.id", ondelete="SET NULL"), index=True, default=None
+    )
+
+
+class NodePool(Base, TimestampMixin):
+    """A named set of nodes in one cluster.
+
+    kind "shared": usable by everyone (grants are accepted but meaningless). kind "dedicated":
+    usable ONLY by tenants holding a NodePoolGrant. Placement picks group-granted pools first,
+    then org-granted, then shared (see app.domain.node_pools). CPU-only sessions ignore pools.
+    """
+    __tablename__ = "node_pool"
+    id: Mapped[str] = mapped_column(String, primary_key=True)            # npl_ULID
+    cluster_id: Mapped[str] = mapped_column(ForeignKey("cluster.id"), index=True)
+    name: Mapped[str] = mapped_column(String)
+    description: Mapped[str | None] = mapped_column(String, default=None)
+    kind: Mapped[str] = mapped_column(String, default="dedicated")       # shared|dedicated
+    __table_args__ = (UniqueConstraint("cluster_id", "name", name="uq_node_pool_cluster_name"),)
+
+
+class NodePoolGrant(Base, TimestampMixin):
+    """Grants a tenant (organization or group) the use of a pool's nodes."""
+    __tablename__ = "node_pool_grant"
+    id: Mapped[str] = mapped_column(String, primary_key=True)            # pgr_ULID
+    pool_id: Mapped[str] = mapped_column(
+        ForeignKey("node_pool.id", ondelete="CASCADE"), index=True
+    )
+    scope: Mapped[str] = mapped_column(String)                           # org|group
+    scope_id: Mapped[str] = mapped_column(String)                        # organization.id | group.id
+    created_by: Mapped[str | None] = mapped_column(String, default=None)
+    __table_args__ = (
+        UniqueConstraint("pool_id", "scope", "scope_id", name="uq_node_pool_grant_scope"),
+    )
 
 
 class GpuDevice(Base, TimestampMixin):
@@ -301,7 +405,16 @@ class GpuDevice(Base, TimestampMixin):
     total_cores: Mapped[int] = mapped_column(Integer, default=100)
     used_cores: Mapped[int] = mapped_column(Integer, default=0)
     status: Mapped[str] = mapped_column(String, default="ready")
-    mode: Mapped[str | None] = mapped_column(String, default=None)       # fractional|exclusive|mig
+    # Current per-CARD pool mode: fractional|exclusive|mig. The hami-core↔mig axis is observed
+    # from HAMi's per-card register annotation; within hami-core, fractional vs exclusive is
+    # GShare policy carried by desired_mode. (Historically this was a node-label echo.)
+    mode: Mapped[str | None] = mapped_column(String, default=None)
+    # Admin-set target pool for this card. NULL follows the observed mode. Applied through the
+    # drain state machine — never flipped under running sessions.
+    desired_mode: Mapped[str | None] = mapped_column(String, default=None)
+    # Drain state machine: ready (placeable) | draining (no new placements; waiting for the last
+    # allocation to end) | applying (mode change in progress on the node) | error.
+    mode_state: Mapped[str] = mapped_column(String, default="ready", server_default=text("'ready'"))
     # In-place GPU yield lending state: "" (normal), "yielded" (the owner yielded, so the physical
     # card is free and lendable), or "lent" (a preemptible spot session is using it). used_* always
     # reflects resident occupancy; borrows are not counted.
@@ -313,6 +426,7 @@ class GpuDevice(Base, TimestampMixin):
             "used_mem_mb <= total_mem_mb AND used_cores <= total_cores", name="no_overcommit"
         ),
         Index("ix_dev_node_status_mode", "node_id", "status", "mode"),
+        Index("ix_dev_cluster_status_mode", "cluster_id", "status", "mode"),
     )
 
 
@@ -347,6 +461,10 @@ class Session(Base, TimestampMixin, SoftDeleteMixin):
     mem_gb: Mapped[int | None] = mapped_column(Integer, default=None)
     disk_gb: Mapped[int | None] = mapped_column(Integer, default=None)
     bound_gpu_uuid: Mapped[str | None] = mapped_column(String, default=None)
+    # The k8s node the pod actually landed on, reported by the operator on Running. The only
+    # placement record for CPU sessions (no bound GPU); for GPU sessions it matches the bound
+    # device's node.
+    node_hostname: Mapped[str | None] = mapped_column(String, default=None)
     billing_wallet_id: Mapped[str | None] = mapped_column(
         ForeignKey("credit_wallet.id"), default=None
     )  # NULL allowed for cpu (free)
@@ -369,12 +487,20 @@ class Session(Base, TimestampMixin, SoftDeleteMixin):
     priority: Mapped[int] = mapped_column(Integer, default=0, server_default=text("0"))
     # status: pending|preparing|running|paused|terminating|terminated|error
     status: Mapped[str] = mapped_column(String, default="pending", index=True)
+    # When the status last changed — stamped by the ORM listener at the end of this module on
+    # every transition, so the admin monitor can show "when did it error / pause / start".
+    status_changed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), default=None)
+    # WHY the session paused or ended, surfaced to the owner:
+    # idle | credit_exhausted | admin_stopped | user_stopped | max_runtime | error
+    status_reason: Mapped[str | None] = mapped_column(String, default=None)
     # snapshot of unit price at admission so price changes don't re-bill
     credit_per_hour_snapshot: Mapped[Decimal] = mapped_column(Numeric(18, 2), default=0)
     device_total_mem_mb: Mapped[int | None] = mapped_column(Integer, default=None)
     pod_ref: Mapped[str | None] = mapped_column(String, default=None)
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), default=None)
     terminated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), default=None)
+    # Backs the per-user caps and queue-fairness counts (always filtered by owner + status).
+    __table_args__ = (Index("ix_sessions_owner_status", "owner_user_id", "status"),)
 
 
 class Allocation(Base, TimestampMixin):
@@ -426,15 +552,6 @@ class SessionCheckpoint(Base, TimestampMixin):
 
 
 # ── Connection token also lives in Redis; row optional for audit ──
-class ConnectionToken(Base, TimestampMixin):
-    __tablename__ = "connection_token"
-    id: Mapped[str] = mapped_column(String, primary_key=True)            # cnx_ULID
-    session_id: Mapped[str] = mapped_column(ForeignKey("session.id"), index=True)
-    kind: Mapped[str] = mapped_column(String)                            # vscode|jupyter|webapp
-    token_hash: Mapped[str] = mapped_column(String)                      # hash only, never plaintext
-    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
-
-
 # ── Storage ──
 class StorageVolume(Base, TimestampMixin, SoftDeleteMixin):
     __tablename__ = "storage_volume"
@@ -445,7 +562,6 @@ class StorageVolume(Base, TimestampMixin, SoftDeleteMixin):
     name: Mapped[str | None] = mapped_column(String, default=None)       # user-chosen display name
     access_mode: Mapped[str] = mapped_column(String)                     # RWO|RWX|ROX
     owner_id: Mapped[str | None] = mapped_column(String, default=None)
-    host: Mapped[str | None] = mapped_column(String, default=None)
     quota_gb: Mapped[int] = mapped_column(Integer, default=0)
     used_gb: Mapped[int] = mapped_column(Integer, default=0)
     # Partial unique index including the name, excluding soft-deleted rows, so one scope can hold
@@ -486,14 +602,19 @@ class VolumePermission(Base, TimestampMixin):
     __table_args__ = (UniqueConstraint("volume_id", "user_id"),)
 
 
-class VolumeQuotaRequest(Base, TimestampMixin):
-    __tablename__ = "volume_quota_request"
-    id: Mapped[str] = mapped_column(String, primary_key=True)            # qrq_ULID
-    volume_id: Mapped[str] = mapped_column(ForeignKey("storage_volume.id"), index=True)
-    requested_gb: Mapped[int] = mapped_column(Integer)
-    status: Mapped[str] = mapped_column(String, default="pending")       # pending|approved|rejected
-    requester_id: Mapped[str] = mapped_column(String)
-    decided_by: Mapped[str | None] = mapped_column(String, default=None)
+class SessionEvent(Base, TimestampMixin):
+    """Append-only lifecycle log per session: what happened, when, and why.
+
+    Written wherever the session transitions (scheduler admission, service actions, operator
+    callbacks); the detail screen renders it as a timeline so error states are readable without
+    a separate message box."""
+
+    __tablename__ = "session_event"
+    id: Mapped[str] = mapped_column(String, primary_key=True)             # sev_ULID
+    session_id: Mapped[str] = mapped_column(String, index=True)
+    kind: Mapped[str] = mapped_column(String)    # created|queued|promoted|preparing|running|paused|resumed|terminated|error
+    reason: Mapped[str | None] = mapped_column(String, default=None)      # status_reason vocabulary
+    message: Mapped[str | None] = mapped_column(String, default=None)     # raw operator text (OOM, evicted, ...)
 
 
 class VolumeSnapshot(Base, TimestampMixin):
@@ -523,7 +644,6 @@ class BudgetAlert(Base, TimestampMixin):
     id: Mapped[str] = mapped_column(String, primary_key=True)            # alr_ULID
     budget_id: Mapped[str] = mapped_column(ForeignKey("budget.id"), index=True)
     threshold_pct: Mapped[int] = mapped_column(Integer)                  # 80|100
-    channel: Mapped[str | None] = mapped_column(String, default=None)
     last_fired_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), default=None)
 
 
@@ -539,6 +659,65 @@ class WebhookSubscription(Base, TimestampMixin):
     events: Mapped[dict] = mapped_column(JSONB, default=dict)
     secret: Mapped[str | None] = mapped_column(String, default=None)
     status: Mapped[str] = mapped_column(String, default="active")
+
+
+class WebhookDelivery(Base, TimestampMixin):
+    """Outbox row for one webhook delivery attempt chain.
+
+    Emitters insert a row in the same transaction as the domain change; the webhook_dispatcher
+    worker POSTs it with retries and marks the outcome. This is what makes webhook subscriptions
+    real — rows used to be stored with no dispatcher at all.
+    """
+    __tablename__ = "webhook_delivery"
+    id: Mapped[str] = mapped_column(String, primary_key=True)            # wbd_ULID
+    subscription_id: Mapped[str] = mapped_column(ForeignKey("webhook_subscription.id"), index=True)
+    event: Mapped[str] = mapped_column(String)
+    payload: Mapped[dict] = mapped_column(JSONB, default=dict)
+    attempts: Mapped[int] = mapped_column(Integer, default=0)
+    next_attempt_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), default=None, index=True)
+    status: Mapped[str] = mapped_column(String, default="pending")       # pending|delivered|failed
+    last_error: Mapped[str | None] = mapped_column(String, default=None)
+
+
+class Notice(Base, TimestampMixin, SoftDeleteMixin):
+    """An announcement. scope=global (super_admin, everyone sees it) or scope=group
+    (group_admin; visible to that group's members and super_admin only)."""
+    __tablename__ = "notice"
+    id: Mapped[str] = mapped_column(String, primary_key=True)            # ntc_ULID
+    scope: Mapped[str] = mapped_column(String, default="global")         # global|group
+    group_id: Mapped[str | None] = mapped_column(ForeignKey("group.id"), index=True, default=None)
+    title: Mapped[str] = mapped_column(String)
+    body: Mapped[str] = mapped_column(Text, default="")
+    author_id: Mapped[str] = mapped_column(ForeignKey("user.id"), index=True)
+    pinned: Mapped[bool] = mapped_column(Boolean, default=False, server_default=text("false"))
+
+
+class Inquiry(Base, TimestampMixin, SoftDeleteMixin):
+    """A user question to the operators. Visible to its author, super_admin, and the
+    group_admins of the author's group (captured at creation)."""
+    __tablename__ = "inquiry"
+    id: Mapped[str] = mapped_column(String, primary_key=True)            # inq_ULID
+    author_id: Mapped[str] = mapped_column(ForeignKey("user.id"), index=True)
+    group_id: Mapped[str | None] = mapped_column(ForeignKey("group.id"), index=True, default=None)
+    title: Mapped[str] = mapped_column(String)
+    body: Mapped[str] = mapped_column(Text, default="")
+    status: Mapped[str] = mapped_column(String, default="open", index=True)  # open|answered|closed
+
+
+class InquiryReply(Base, TimestampMixin):
+    __tablename__ = "inquiry_reply"
+    id: Mapped[str] = mapped_column(String, primary_key=True)            # irp_ULID
+    inquiry_id: Mapped[str] = mapped_column(ForeignKey("inquiry.id"), index=True)
+    author_id: Mapped[str] = mapped_column(ForeignKey("user.id"), index=True)
+    body: Mapped[str] = mapped_column(Text)
+
+
+class SystemSetting(Base, TimestampMixin):
+    """One system-wide setting per row. Small, typed-by-convention key-value store —
+    currently: credit_refill_day ("1".."28") and credit_refill_hour ("0".."23", KST)."""
+    __tablename__ = "system_setting"
+    key: Mapped[str] = mapped_column(String, primary_key=True)
+    value: Mapped[str] = mapped_column(String)
 
 
 class AuditLog(Base, TimestampMixin):
@@ -557,3 +736,10 @@ class AuditLog(Base, TimestampMixin):
     group_id: Mapped[str | None] = mapped_column(String, index=True, default=None)
     prev_hash: Mapped[str | None] = mapped_column(String, default=None)  # hash chain
     entry_hash: Mapped[str | None] = mapped_column(String, default=None)
+
+
+@event.listens_for(Session.status, "set", propagate=True)
+def _stamp_session_status_change(target: Session, value: str, oldvalue: object, _initiator: object) -> None:
+    """Stamp status_changed_at on every real status transition (21 call sites, one listener)."""
+    if value != oldvalue:
+        target.status_changed_at = datetime.now(UTC)

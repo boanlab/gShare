@@ -5,6 +5,7 @@ token's ``global_role``. Guests whose membership expired are excluded at resolve
 """
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 
@@ -75,6 +76,8 @@ _ACTION_MATRIX: dict[str, tuple] = {
     "policy.create": ("super_admin", ("scoped", "group_admin")),
     "policy.update": ("super_admin", ("scoped", "group_admin")),
     "policy.delete": ("super_admin", ("scoped", "group_admin")),
+    # Monitoring — raw fleet telemetry (measured GPU/host metrics) is system-admin only.
+    "monitoring.read": ("super_admin",),
     # Images — catalogue management is super_admin only; building is project work, member and above
     "image.create": ("super_admin",),
     "image.build": ("super_admin", ("scoped", "member")),
@@ -95,8 +98,17 @@ _ACTION_MATRIX: dict[str, tuple] = {
     "node.create": ("super_admin",),
     "node.cordon": ("super_admin",),
     "node.drain": ("super_admin",),
+    # Node pools — pools/node assignment are super_admin only; an org_admin reads the pools granted
+    # to their organization and sub-assigns them to their own groups (rule in domain.node_pools).
+    "pool.read": ("super_admin", ("scoped", "org_admin")),
+    "pool.manage": ("super_admin",),
+    "pool.grant": ("super_admin", ("scoped", "org_admin")),
     # Storage volumes — group_admin+
     "volume.create": ("super_admin", ("scoped", "group_admin")),
+    # Notices: super_admin posts globally; a group_admin posts to their own group.
+    "notice.create": ("super_admin", ("scoped", "group_admin")),
+    # Inquiries: answering/closing is for super_admin and the author's group_admins.
+    "inquiry.answer": ("super_admin", ("scoped", "group_admin")),
     "volume.delete": ("super_admin", ("scoped", "group_admin")),
     # Budgets / FinOps — super_admin·org_admin·group_admin
     "budget.read": ("super_admin", ("scoped", "group_admin")),
@@ -175,8 +187,39 @@ def rbac_allows(principal: Principal, action: str, group_id: str | None = None) 
     return False
 
 
+# Per-process Principal cache: resolve_principal runs on EVERY authenticated request (2-3
+# SELECTs), which at thousands of users is pure overhead. Memberships change rarely; 30s of
+# staleness is acceptable (revocation via must_change_password rides in the JWT claims and is
+# unaffected). Keyed by user id + the claim fields that shape the Principal.
+_PRINCIPAL_CACHE: dict[str, tuple[float, Principal]] = {}
+_PRINCIPAL_TTL_SEC = 30.0
+_PRINCIPAL_CACHE_MAX = 8192
+
+
 async def resolve_principal(db: AsyncSession, claims: dict) -> Principal:
-    """Build a Principal from verified JWT claims + DB memberships."""
+    """Build a Principal from verified JWT claims + DB memberships (30s-cached per process)."""
+    cache_key = f"{claims.get('sub')}|{claims.get('global_role')}|{sorted(claims.get('global_roles') or [])}"
+    now_mono = time.monotonic()
+    hit = _PRINCIPAL_CACHE.get(cache_key)
+    if hit is not None and now_mono - hit[0] < _PRINCIPAL_TTL_SEC:
+        return hit[1]
+    principal = await _resolve_principal_uncached(db, claims)
+    if len(_PRINCIPAL_CACHE) >= _PRINCIPAL_CACHE_MAX:
+        _PRINCIPAL_CACHE.clear()   # simplest bound; a full rebuild costs one request per user
+    _PRINCIPAL_CACHE[cache_key] = (now_mono, principal)
+    return principal
+
+
+async def _resolve_principal_uncached(db: AsyncSession, claims: dict) -> Principal:
+    # Account-state gate: a suspended or soft-deleted user keeps a valid bearer token for up to
+    # 24h, so the token alone cannot be trusted — reject here (30s principal cache bounds the
+    # window between suspension and lock-out).
+    from app.db.models import User as _User
+
+    user_row = await db.get(_User, claims["sub"])
+    if user_row is None or user_row.deleted_at is not None or user_row.status == "suspended":
+        raise Forbidden("account is suspended or deleted")
+
     rows = (await db.scalars(
         select(Membership).where(Membership.user_id == claims["sub"])
     )).all()

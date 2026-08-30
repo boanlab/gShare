@@ -12,11 +12,13 @@ package controller
 import (
 	"context"
 	"sort"
+	"strconv"
 	"strings"
 
 	corev1 "k8s.io/api/core/v1"
 	netv1 "k8s.io/api/networking/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
@@ -36,6 +38,8 @@ const (
 	finalizer = "gshare.io/session-finalizer"
 	// traceparentAnnotation carries the W3C traceparent injected by the SoT control plane.
 	traceparentAnnotation = "gshare.io/traceparent"
+	// pauseReasonAnnotation is stamped by the idle reaper; forwarded as the Paused message.
+	pauseReasonAnnotation = "gshare.io/pause-reason"
 	// yieldedGPUsAnnotation lists (CSV) the GPU UUIDs a node has in-place-yielded — the feed the
 	// HAMi scheduler-extender reads to treat a card as preemptible capacity. (build/hami-fork)
 	yieldedGPUsAnnotation = "gshare.io/yielded-gpus"
@@ -44,13 +48,19 @@ const (
 // SessionReconciler reconciles a GShareSession object.
 type SessionReconciler struct {
 	client.Client
-	Scheme    *runtime.Scheme
-	Builder   *podbuilder.Builder
-	SoT       sot.Reporter
-	ClusterID string
+	// EventReader reads Events uncached (mgr.GetAPIReader()); used only on terminal pod
+	// transitions to recover an eviction cause. Nil in tests that do not need it.
+	EventReader client.Reader
+	Scheme      *runtime.Scheme
+	Builder     *podbuilder.Builder
+	SoT         sot.Reporter
+	ClusterID   string
 	// Checkpointer drives lossless-pause checkpoint/yield/resume via a node agent. Nil when no
 	// agent is wired — the pause path then falls back to cold pause.
 	Checkpointer Checkpointer
+	// VolumeStorageClass names the StorageClass backing session-volume PVCs; empty uses the
+	// cluster default.
+	VolumeStorageClass string
 }
 
 // Checkpointer drives a privileged node agent (gshare-infra). See docs/paper/lossless-pause.md.
@@ -182,7 +192,7 @@ func (r *SessionReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 				if aerr := r.setNodeYielded(ctx, live.Spec.NodeName, s.Status.BoundGpuUuid, true); aerr != nil {
 					logger.Error(aerr, "publish yielded-gpus node annotation failed", "session", s.Name)
 				}
-				_ = r.SoT.Report(ctx, s.Name, sot.StatusEvent{Phase: "Paused", YieldState: "Yielded", TraceID: traceID})
+				_ = r.SoT.Report(ctx, s.Name, sot.StatusEvent{Phase: "Paused", YieldState: "Yielded", TraceID: traceID, Message: s.Annotations[pauseReasonAnnotation]})
 				logger.Info("session yielded in-place (Pod alive, VRAM evicted)", "session", s.Name)
 				return ctrl.Result{}, nil
 			}
@@ -218,7 +228,7 @@ func (r *SessionReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 			if err := r.Status().Update(ctx, &s); err != nil {
 				return ctrl.Result{}, err
 			}
-			_ = r.SoT.Report(ctx, s.Name, sot.StatusEvent{Phase: "Paused", TraceID: traceID})
+			_ = r.SoT.Report(ctx, s.Name, sot.StatusEvent{Phase: "Paused", TraceID: traceID, Message: s.Annotations[pauseReasonAnnotation]})
 			logger.Info("session paused (pod released)", "session", s.Name, "lossless", checkpointRef != "")
 		}
 		return ctrl.Result{}, nil
@@ -278,12 +288,27 @@ func (r *SessionReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 		}
 	}
 
+	// 1.5) PVCs backing spec.volumes — created here, once, and NOT owned by the session: a
+	// volume outlives the sessions that mount it (that is the whole point of a volume).
+	if err := r.ensureVolumeClaims(ctx, &s); err != nil {
+		return ctrl.Result{}, err
+	}
+
 	// 2) desired Pod by mode.
 	pod := r.Builder.BuildPod(&s)
 	if err := controllerutil.SetControllerReference(&s, pod, r.Scheme); err != nil {
 		return ctrl.Result{}, err
 	}
 	if err := r.applyIfAbsent(ctx, pod); err != nil {
+		if apierrors.IsInvalid(err) {
+			// A structurally invalid pod will never succeed by retrying — tell the control plane
+			// (session -> error with the reason) instead of crash-looping into a silent pending.
+			_ = r.SoT.Report(ctx, s.Name, sot.StatusEvent{
+				Phase: "Error", Message: "pod rejected: " + err.Error(),
+			})
+			logger.Error(err, "pod spec rejected by the API server; reported error", "session", s.Name)
+			return ctrl.Result{}, nil
+		}
 		return ctrl.Result{}, err
 	}
 
@@ -333,13 +358,27 @@ func (r *SessionReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 			return ctrl.Result{}, err
 		}
 		// running->consume / error->refund decision (made only in the control plane).
-		_ = r.SoT.Report(ctx, s.Name, sot.StatusEvent{
+		ev := sot.StatusEvent{
 			Phase:        phase,
 			BoundGpuUUID: gpu,
+			NodeName:     live.Spec.NodeName,
 			PodRef:       s.Status.PodRef,
 			UsedMemMB:    s.Status.UsedMemMb,
 			TraceID:      traceID,
-		})
+		}
+		if live.Status.Phase == corev1.PodFailed || live.Status.Phase == corev1.PodSucceeded {
+			// Carry the kubelet's failure cause (e.g. "Evicted: Pod ephemeral local storage usage
+			// exceeds the total limit of containers 20Gi.") so the control plane can tell the
+			// user why the session ended, not just that it did.
+			ev.Message = failureMessage(live.Status.Reason, live.Status.Message)
+			if ev.Message == "" {
+				// A gracefully-evicted pod (entrypoint exits 0 on SIGTERM) ends SUCCEEDED with an
+				// empty reason; the only durable evidence is the kubelet's Evicted Event. One
+				// uncached read on a terminal transition only.
+				ev.Message = evictionMessage(ctx, r.EventReader, &live)
+			}
+		}
+		_ = r.SoT.Report(ctx, s.Name, ev)
 		logger.Info("session phase changed", "session", s.Name, "phase", phase)
 	}
 
@@ -448,6 +487,73 @@ func (r *SessionReconciler) cleanupChildren(ctx context.Context, s *gsharev1.GSh
 	return nil
 }
 
+// ensureVolumeClaims creates a PVC per spec.volumes entry when missing (idempotent), and grows an
+// existing one whose request is below spec.sizeGb — an approved quota increase reaching the claim
+// at the next session start; the volume syncer does the same between sessions. Claims are never
+// shrunk (a CSI cannot, and ZFS would not, safely). The PVC name is the sanitized volume id, the
+// ledger id itself rides on an annotation, size comes from spec (10Gi default for older control
+// planes), and the access mode is the volume's own class. Deliberately no ownerRef: the claim — and
+// its data — must survive session teardown; volume deletion is a control-plane concern.
+func (r *SessionReconciler) ensureVolumeClaims(ctx context.Context, s *gsharev1.GShareSession) error {
+	for _, v := range s.Spec.Volumes {
+		name := podbuilder.SanitizeVolumeName(v.Name)
+		sizeGb := v.SizeGb
+		if sizeGb <= 0 {
+			sizeGb = 10
+		}
+		want := resource.MustParse(strconv.Itoa(sizeGb) + "Gi")
+		var existing corev1.PersistentVolumeClaim
+		err := r.Get(ctx, types.NamespacedName{Namespace: r.Builder.Namespace, Name: name}, &existing)
+		if err == nil {
+			if err := r.growClaim(ctx, &existing, want); err != nil {
+				return err
+			}
+			continue
+		}
+		if !apierrors.IsNotFound(err) {
+			return err
+		}
+		mode := corev1.PersistentVolumeAccessMode(v.Mode)
+		pvc := &corev1.PersistentVolumeClaim{
+			ObjectMeta: metav1.ObjectMeta{
+				Namespace:   r.Builder.Namespace,
+				Name:        name,
+				Labels:      map[string]string{podbuilder.VolumeLabel: name},
+				Annotations: map[string]string{podbuilder.VolumeIDAnnotation: v.Name},
+			},
+			Spec: corev1.PersistentVolumeClaimSpec{
+				AccessModes: []corev1.PersistentVolumeAccessMode{mode},
+				Resources: corev1.VolumeResourceRequirements{
+					Requests: corev1.ResourceList{corev1.ResourceStorage: want},
+				},
+			},
+		}
+		if r.VolumeStorageClass != "" {
+			pvc.Spec.StorageClassName = &r.VolumeStorageClass
+		}
+		if err := r.Create(ctx, pvc); err != nil && !apierrors.IsAlreadyExists(err) {
+			return err
+		}
+	}
+	return nil
+}
+
+// growClaim raises the PVC's storage request to want when it is currently smaller. A class
+// without allowVolumeExpansion rejects the patch; that surfaces as a reconcile error rather than
+// being hidden, since the user was promised the larger quota.
+func (r *SessionReconciler) growClaim(ctx context.Context, pvc *corev1.PersistentVolumeClaim, want resource.Quantity) error {
+	cur, ok := pvc.Spec.Resources.Requests[corev1.ResourceStorage]
+	if ok && cur.Cmp(want) >= 0 {
+		return nil
+	}
+	patch := client.MergeFrom(pvc.DeepCopy())
+	if pvc.Spec.Resources.Requests == nil {
+		pvc.Spec.Resources.Requests = corev1.ResourceList{}
+	}
+	pvc.Spec.Resources.Requests[corev1.ResourceStorage] = want
+	return r.Patch(ctx, pvc, patch)
+}
+
 // applyIfAbsent creates obj if missing, otherwise no-ops (server-side apply later).
 func (r *SessionReconciler) applyIfAbsent(ctx context.Context, obj client.Object) error {
 	err := r.Create(ctx, obj)
@@ -481,6 +587,39 @@ func mapPhase(p *corev1.Pod) string {
 		// Unknown phase: the Pod exists but is not yet observed — treat as Preparing.
 		return "Preparing"
 	}
+}
+
+// failureMessage joins a failed Pod's status Reason and Message as "Reason: Message",
+// omitting the colon when either half is empty (both trimmed).
+// evictionMessage returns "Evicted: <kubelet message>" when the kubelet recorded an Evicted
+// event for the pod, and "" otherwise. Reader is the manager's API reader (uncached — events are
+// not worth an informer). Nil-safe.
+func evictionMessage(ctx context.Context, reader client.Reader, pod *corev1.Pod) string {
+	if reader == nil || pod == nil || pod.Name == "" {
+		return ""
+	}
+	var evs corev1.EventList
+	if err := reader.List(ctx, &evs, client.InNamespace(pod.Namespace)); err != nil {
+		return ""
+	}
+	for i := range evs.Items {
+		e := &evs.Items[i]
+		if e.Reason == "Evicted" && e.InvolvedObject.Kind == "Pod" && e.InvolvedObject.Name == pod.Name {
+			return failureMessage(e.Reason, e.Message)
+		}
+	}
+	return ""
+}
+
+func failureMessage(reason, message string) string {
+	reason, message = strings.TrimSpace(reason), strings.TrimSpace(message)
+	switch {
+	case reason == "":
+		return message
+	case message == "":
+		return reason
+	}
+	return reason + ": " + message
 }
 
 // boundGPU extracts the bound GPU UUID from the live Pod, tolerating absence (cpu
@@ -559,7 +698,9 @@ func firstGPUUUID(v string) string {
 // otherwise "". Sentinels ("all"/"none"/"void"/empty) and bare integer indices are
 // rejected so we never report a non-UUID as the bound device.
 func normalizeGPUUUID(tok string) string {
-	if !strings.HasPrefix(tok, "GPU-") {
+	// MIG- accepted defensively: env-fallback discovery on a MIG-partitioned card can surface a
+	// MIG instance UUID; rejecting it would blank BoundGpuUuid and break the reaper's util lookup.
+	if !strings.HasPrefix(tok, "GPU-") && !strings.HasPrefix(tok, "MIG-") {
 		return ""
 	}
 	if len(tok) <= len("GPU-") {

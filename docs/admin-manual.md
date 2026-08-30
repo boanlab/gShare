@@ -105,6 +105,12 @@ The storage rate (`STORAGE_CREDIT_PER_GB_HOUR`) is deployment configuration, set
 the environment. It has no admin UI by design.
 
 ![Resources, offerings, presets](screenshots/26-superadmin-admin-resources.png)
+
+> **`gpu_model` must equal the device's reported model string exactly** (e.g.
+> `NVIDIA RTX PRO 6000 Blackwell Max-Q Workstation Edition`, not `RTX PRO 6000`): the scheduler
+> matches offerings to cards by string equality. The "in cluster" tag on the catalogue row shows
+> whether any card in the fleet currently reports that exact string — copy the model from the GPU
+> devices screen when creating an offering.
 ![New offering](screenshots/27-superadmin-admin-offering-new.png)
 ![Edit offering](screenshots/28-superadmin-admin-offering-edit.png)
 ![New resource policy](screenshots/29-superadmin-admin-policy-new.png)

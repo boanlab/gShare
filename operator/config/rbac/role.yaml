@@ -59,6 +59,42 @@ rules:
 - apiGroups:
   - gshare.io
   resources:
+  - gpumodechanges
+  verbs:
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - gshare.io
+  resources:
+  - gpumodechanges/status
+  verbs:
+  - get
+  - patch
+  - update
+- apiGroups:
+  - gshare.io
+  resources:
+  - gshareimagebuilds
+  verbs:
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - gshare.io
+  resources:
+  - gshareimagebuilds/status
+  verbs:
+  - get
+  - patch
+  - update
+- apiGroups:
+  - gshare.io
+  resources:
   - gsharesessions
   verbs:
   - get

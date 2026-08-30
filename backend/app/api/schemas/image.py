@@ -23,6 +23,9 @@ class ImageRead(BaseModel):
     supported_gpus: list[Any]
     cuda_version: str | None = None
     public: bool = True
+    # null = shared catalogue entry; set = a private image its owner (and admins) can see. The
+    # console distinguishes the caller's own images with it, so it has to survive the projection.
+    owner_user_id: str | None = None
     created_at: datetime | None = None
     import_status: str | None = None
 
@@ -39,10 +42,15 @@ class ImageBuildRead(BaseModel):
 
     id: str
     group_id: str | None = None
+    owner_user_id: str | None = None
+    name: str | None = None
     source: str
     status: str
+    error: str | None = None
     image_ref: str | None = None
+    image_id: str | None = None
     created_at: datetime | None = None
+    started_at: datetime | None = None
     finished_at: datetime | None = None
 
 

@@ -10,12 +10,11 @@ binding is the Go operator, which reconciles the desired CR/row.
 from __future__ import annotations
 
 import asyncio
-import time
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import ROUND_HALF_UP, Decimal
 
-from sqlalchemy import func, select, true
+from sqlalchemy import func, or_, select, true
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.schemas.session import SessionCreate, SessionRead
@@ -25,6 +24,7 @@ from app.core import ids
 from app.core.config import settings
 from app.core.cuda import cuda_compatible
 from app.core.errors import (
+    DomainError,
     Forbidden,
     IdempotencyInProgress,
     ImbalancedAllocation,
@@ -32,6 +32,7 @@ from app.core.errors import (
     NoCapacity,
     NotFound,
     QuotaExceeded,
+    Unserviceable,
     VramBelowMinimum,
 )
 from app.core.logging import get_logger
@@ -46,21 +47,23 @@ from app.db.models import (
     Offering,
     Project,
     QueueEntry,
-    ResourcePolicy,
     Session,
     StorageVolume,
     VolumeMount,
     VolumePermission,
 )
+from app.domain import queue_ranking
 from app.domain.budget_service import BudgetService
 from app.domain.credit_engine import CreditEngine
-from app.domain.pricing import compute_credit_per_hour, round_credit
+from app.domain.node_pools import node_pool_map, resolve_pool_access
+from app.domain.policy import EffectivePolicy, resolve_effective_policy
+from app.domain.pool import maybe_apply_drained_mode
+from app.domain.pricing import round_credit
+from app.domain.session_events import record_session_event
 
 log = get_logger(__name__)
 
-QUEUE_KEY = "gshare:queue"
-# score = PRIORITY_WEIGHT * priority + aging(enqueued_at).
-PRIORITY_WEIGHT = 1_000_000.0
+# Queue ordering lives in app.domain.queue_ranking (PG QueueEntry is the only queue).
 
 
 @dataclass
@@ -99,7 +102,7 @@ class SchedulerService:
         """
         # Auto-select a cluster when the caller did not pin one (multi-cluster deployments).
         if not req.cluster_id:
-            req.cluster_id = await self._resolve_cluster(req)
+            req.cluster_id = await self._resolve_cluster(req, principal)
 
         # Reject an unknown offering/image/wallet with 404 rather than letting an FK violation 500.
         await self._validate_refs(req)
@@ -156,7 +159,7 @@ class SchedulerService:
                 # collides.
                 async with self.db.begin():
                     await self._check_cpu_quota(req, principal, exclude_session_id=sess.id)
-                    est = await self._estimate(req)   # rate proportional to cpu/mem/disk
+                    est = await self._estimate(req)   # zero for cpu sessions (free)
                     scope_chain = await self._scope_chain(req)
                 if req.billing_wallet_id and est.hold_amount > Decimal("0"):
                     async with self.db.begin():
@@ -200,6 +203,11 @@ class SchedulerService:
                         placed = await self.reserve_spot_slice(sess, req)
 
             if not placed:
+                # Queueing only makes sense when capacity can come back. If the cluster has no
+                # ready device of this mode and model AT ALL, the session would wait forever —
+                # answer with a typed error instead of a silent永-pending queue entry.
+                async with self.db.begin():
+                    await self._assert_serviceable(sess, req)
                 # No capacity, no fitting card, nothing to preempt -> enqueue, keep the hold, return
                 # pending.
                 async with self.db.begin():
@@ -210,11 +218,17 @@ class SchedulerService:
             async with self.db.begin():
                 await self.handoff.apply_desired(sess, req)
             return SessionRead.model_validate(sess)
-        except Exception:
-            await self._release_reservation(sid)
+        except Exception as e:
+            # A rejected gate or a failed handoff leaves the row as `error` — carry WHY on the
+            # session itself (the typed error code doubles as the status_reason), so the list and
+            # detail views can explain the failure instead of a bare "error". The HTTP response
+            # already told the creator; this is for everyone looking at the row later.
+            reason = e.code if isinstance(e, DomainError) else "create_failed"
+            await self._release_reservation(sid, reason=reason)
+            await self._refund_stranded_hold(sid)
             raise
 
-    async def _resolve_cluster(self, req: SessionCreate) -> str:
+    async def _resolve_cluster(self, req: SessionCreate, principal: Principal) -> str:
         """Pick a cluster automatically when the request did not name one.
 
         Among connected clusters:
@@ -264,10 +278,16 @@ class SchedulerService:
                     GpuDevice.cluster_id == c.id, GpuDevice.status == "ready"
                 )
                 if req.mode is not None:
-                    stmt = stmt.where(GpuDevice.mode == req.mode)
+                    # Same pool set reserve_slice uses: fractional is servable by MIG cards too.
+                    modes = (req.mode,) if req.mode != "fractional" else ("fractional", "mig")
+                    stmt = stmt.where(GpuDevice.mode.in_(modes))
                 if model is not None:
                     stmt = stmt.where(GpuDevice.model == model)
                 devs = (await self.db.scalars(stmt)).all()
+                # Node pools: only cards on nodes this tenant may place on count.
+                devs = await self._filter_pool_access(
+                    devs, c.id, principal.user_id, req.group_id
+                )
                 if not devs:
                     continue
                 fits = False
@@ -345,7 +365,25 @@ class SchedulerService:
         returns 403 — this is what stops a direct API call from draining someone else's credits.
         """
         wid = getattr(req, "billing_wallet_id", None)
-        if not wid or "super_admin" in principal.global_roles:
+        if not wid:
+            # No wallet named: resolve the requester's own personal wallet instead of letting the
+            # hold run against None — which surfaced as a misleading 402 with available=0. The
+            # console always sends the wallet; this guards direct API callers.
+            async with self.db.begin():
+                default_wid = await self.db.scalar(
+                    select(CreditWallet.id).where(
+                        CreditWallet.owner_type == "user",
+                        CreditWallet.owner_id == principal.user_id,
+                    ).order_by(CreditWallet.id.asc()).limit(1)
+                )
+            if default_wid is None and req.resource_class == "gpu":
+                raise NotFound(
+                    "no personal wallet to bill this session to",
+                    {"user_id": principal.user_id},
+                )
+            req.billing_wallet_id = default_wid
+            return
+        if "super_admin" in principal.global_roles:
             return
         # Wrap the read in its own tx and close it, so the following _persist_pending begin() is
         # clean.
@@ -392,6 +430,11 @@ class SchedulerService:
                         VolumePermission.user_id == principal.user_id,
                     )
                 )
+                # A group volume is shared with its whole group by construction: any member may
+                # mount it — rw when the volume is RWX, ro otherwise — without an explicit
+                # permission row (which can still upgrade/downgrade an individual).
+                if role is None and vol.scope == "group" and vol.scope_id in principal.memberships:
+                    role = "rw" if vol.access_mode == "RWX" else "ro"
                 if not is_mgr and role is None:
                     raise Forbidden(
                         "not permitted: cannot mount a volume you have no access to",
@@ -420,6 +463,10 @@ class SchedulerService:
         async with self.db.begin():
             offering = await self.db.get(Offering, req.offering_id)
             if offering is None:
+                raise NotFound("offering not found", {"offering_id": req.offering_id})
+            # A retired offering must not accept new sessions — deactivation was previously
+            # display-only, which let direct API calls keep using it.
+            if offering.status == "inactive":
                 raise NotFound("offering not found", {"offering_id": req.offering_id})
             image = await self.db.get(Image, req.image_id)
             if image is None:
@@ -480,9 +527,15 @@ class SchedulerService:
             )
         ).all()
         # 1. Single-node feasibility. A node reporting 0 for a resource is skipped for
-        #    that resource.
-        max_cpu = max((n.cpu or 0 for n in nodes), default=0)
-        max_node_mem = max((n.mem or 0 for n in nodes), default=0)
+        #    that resource. CPU and RAM subtract the NODE_RESERVED_* margin that the placement
+        #    gate (_filter_node_headroom) holds back too — a request that clears raw capacity
+        #    but not capacity-minus-reserve would otherwise queue forever.
+        max_cpu = max(
+            ((n.cpu - settings.NODE_RESERVED_CPU) if n.cpu else 0 for n in nodes), default=0
+        )
+        max_node_mem = max(
+            ((n.mem - settings.NODE_RESERVED_MEM_GB) if n.mem else 0 for n in nodes), default=0
+        )
         max_node_disk = max((n.disk or 0 for n in nodes), default=0)
         if need_cpu and max_cpu and need_cpu > max_cpu:
             raise NoCapacity(
@@ -499,7 +552,13 @@ class SchedulerService:
                 "cannot be scheduled: requested disk exceeds the capacity of any single node",
                 {"resource": "disk", "reason": "node_too_small", "need_gb": need_disk, "max_node_gb": max_node_disk},
             )
-        # 2. Aggregate availability gate.
+        # 2. Aggregate availability gate — CPU sessions only. They have no queue, so a full
+        # cluster must answer 409 up front. A GPU session that clears single-node feasibility
+        # flows on to the reservation, whose per-node headroom filter (_filter_node_headroom)
+        # queues it instead: a host CPU/RAM shortage is as transient as a VRAM one, and the
+        # queue is the right waiting room for both.
+        if sess.resource_class != "cpu":
+            return
         cap_cpu = sum(n.cpu or 0 for n in nodes)
         cap_mem = sum(n.mem or 0 for n in nodes)
         cap_disk = sum(n.disk or 0 for n in nodes)
@@ -540,10 +599,11 @@ class SchedulerService:
             cpu_v = req.cpu if req.cpu is not None else (offering.cpu if offering is not None else None)
             mem_v = req.mem_gb if req.mem_gb is not None else (offering.mem_gb if offering is not None else None)
             disk_v = req.disk_gb if req.disk_gb is not None else (offering.disk_gb if offering is not None else None)
-            # CPU sessions are priced proportionally to cpu/mem/disk; GPU sessions use the offering
-            # rate, with occupancy applied at hold and consume time.
+            # Only GPU time consumes credits (offering rate, occupancy applied at hold and consume
+            # time). CPU sessions are free: host cpu/mem/disk are governed by resource-policy
+            # quotas, not billing.
             if req.resource_class == "cpu":
-                snapshot = compute_credit_per_hour(cpu_v, mem_v, disk_v)
+                snapshot = Decimal("0")
             else:
                 snapshot = offering.credit_per_hour if offering is not None else Decimal("0")
             # Spot (preemptible) sessions can be reclaimed, so they get the discounted rate (normal
@@ -604,6 +664,7 @@ class SchedulerService:
                 credit_per_hour_snapshot=snapshot,
             )
             self.db.add(sess)
+            record_session_event(self.db, sess.id, "created")
             # Persist the mounts so the session detail can show them and a mounted volume cannot be
             # deleted underneath it (see _active_mount_session_ids).
             for m in getattr(req, "volume_mounts", None) or []:
@@ -619,57 +680,86 @@ class SchedulerService:
         # Pending row is durable now (survives a later gate rejection for audit).
         return sess
 
-    async def reschedule_from_queue(self) -> None:
-        """Dequeue highest-priority queued session on capacity return; queue_ticker worker.
+    async def reschedule_from_queue(self) -> str:
+        """Try to admit the head of the queue; queue_ticker worker. Returns the outcome:
 
-        ZPOPMAX the top score (highest priority), re-run the admission VRAM precheck; on success
-        bind (reserve capacity + handoff), on still-no-capacity push the entry back (re-ZADD).
+        - ``"empty"``    — no queue entries
+        - ``"admitted"`` — head reserved and handed off (entry deleted); more may follow
+        - ``"blocked"``  — head still does not fit; strict head-of-line, stop this tick
+        - ``"skipped"``  — a stale entry was dropped; the caller may try again immediately
+
+        Ranking comes from queue_ranking over the PG rows — there is no Redis queue, so the
+        displayed position and the dequeue order can never diverge. The entry is deleted only
+        AFTER a successful handoff; on handoff failure the reservation is released and the entry
+        simply stays queued for the next tick.
         """
-        redis = get_redis()
-        popped = await redis.zpopmax(QUEUE_KEY, 1)
-        if not popped:
-            return
-        member, score = popped[0]
-        session_id = member
-
         admitted: tuple[Session, SessionCreate] | None = None
-        push_back = False
+        outcome = "empty"
         async with self.db.begin():
-            entry = (
-                await self.db.scalars(
-                    select(QueueEntry).where(QueueEntry.session_id == session_id)
-                )
-            ).first()
-            sess = await self.db.get(Session, session_id)
+            entry = await queue_ranking.head(self.db)
+            if entry is None:
+                return "empty"
+            sess = await self.db.get(Session, entry.session_id)
             if sess is None or sess.status != "pending":
                 # Session vanished or already progressed — drop the stale queue entry.
-                if entry is not None:
-                    await self.db.delete(entry)
+                await self.db.delete(entry)
+                outcome = "skipped"
             else:
                 req = self._req_from_entry(entry, sess)
                 placed = await self.reserve_slice(sess, req)
                 if not placed and getattr(sess, "preemptible", False):
                     placed = await self.reserve_spot_slice(sess, req)
                 if placed:
-                    if entry is not None:
-                        await self.db.delete(entry)
                     admitted = (sess, req)
+                    outcome = "admitted"
                 else:
-                    # Still no capacity — push back onto the queue at the same score.
-                    push_back = True
+                    outcome = "blocked"
 
-        if push_back:
-            await redis.zadd(QUEUE_KEY, {member: score})
-            return
         if admitted is not None:
             sess, req = admitted
             try:
                 async with self.db.begin():
                     await self.handoff.apply_desired(sess, req)
             except Exception:
+                # Keep the queue entry (still present) and release the reservation for retry.
                 await self._release_reservation(sess.id)
-                await redis.zadd(QUEUE_KEY, {member: score})  # put it back on the queue so it can be retried
                 raise
+            async with self.db.begin():
+                entry = (
+                    await self.db.scalars(
+                        select(QueueEntry).where(QueueEntry.session_id == sess.id)
+                    )
+                ).first()
+                waited_sec: float | None = None
+                if entry is not None:
+                    enq = entry.enqueued_at
+                    if enq.tzinfo is None:
+                        enq = enq.replace(tzinfo=UTC)
+                    waited_sec = max((datetime.now(UTC) - enq).total_seconds(), 0.0)
+                    await self.db.delete(entry)
+                # Tell the owner their wait is over — the pod is starting now.
+                from app.domain.notification_service import NotificationService
+
+                record_session_event(self.db, sess.id, "promoted")
+                await NotificationService(self.db).notify(
+                    [sess.owner_user_id], "session_promoted", "Session starting",
+                    f"Session '{sess.name or sess.id}' left the queue and is starting.",
+                    params={"session_name": sess.name or sess.id}, session_id=sess.id,
+                )
+            if waited_sec is not None:
+                await self._record_wait_sample(waited_sec)
+            await self._publish_queue_event("admitted", sess.id)
+        return outcome
+
+    @staticmethod
+    async def _record_wait_sample(waited_sec: float) -> None:
+        """Keep the last 100 realized queue waits (seconds) for the /queue/mine ETA estimate."""
+        try:
+            redis = get_redis()
+            await redis.lpush("gshare:queue:wait_samples", f"{waited_sec:.0f}")
+            await redis.ltrim("gshare:queue:wait_samples", 0, 99)
+        except Exception:  # noqa: BLE001 — the ETA is a convenience, never a failure source
+            pass
 
     async def _reconcile_device_usage(self, devs) -> None:
         """Resynchronise device.used_* from the sum of live (unreleased) allocations.
@@ -696,6 +786,107 @@ class SchedulerService:
             d.used_mem_mb = int(row[0] or 0)
             d.used_cores = int(row[1] or 0)
 
+    async def _assert_serviceable(self, sess: Session, req: SessionCreate) -> None:
+        """Reject a request no device in the cluster can EVER serve, instead of enqueueing it.
+
+        The queue is for transient capacity shortage. When zero ready devices match the requested
+        mode and GPU model — e.g. an exclusive request against a cluster whose cards are all in the
+        fractional pool — the entry would never be dequeued, so answer 409 `unserviceable` up front.
+        Occupancy and lend_state are deliberately ignored: a busy or lent card still proves the
+        class of request is serviceable here eventually.
+        """
+        mode = sess.mode or req.mode
+        if not mode:
+            return
+        offering = await self.db.get(Offering, req.offering_id)
+        model = offering.gpu_model if offering else None
+        # Same pool set the reservation uses: fractional requests are servable by MIG cards too.
+        modes = (mode,) if mode != "fractional" else ("fractional", "mig")
+        cluster_id = sess.cluster_id or req.cluster_id
+        stmt = select(GpuDevice).where(
+            GpuDevice.cluster_id == cluster_id,
+            GpuDevice.status == "ready",
+            GpuDevice.mode.in_(modes),
+        )
+        if model is not None:
+            stmt = stmt.where(GpuDevice.model == model)
+        devs = (await self.db.scalars(stmt)).all()
+        # Node pools: a card this tenant may never place on does not make the request serviceable.
+        devs = await self._filter_pool_access(
+            devs, cluster_id, sess.owner_user_id, sess.group_id or req.group_id
+        )
+        if not devs:
+            raise Unserviceable(
+                f"no ready {mode} device of this GPU model in the cluster",
+                {"mode": mode, "gpu_model": model, "cluster_id": sess.cluster_id or req.cluster_id},
+            )
+
+    async def _filter_pool_access(self, devs, cluster_id: str, user_id: str, group_id: str | None):
+        """Keep only cards on nodes in a pool the tenant may use (see app.domain.node_pools)."""
+        if not devs:
+            return devs
+        access = await resolve_pool_access(
+            self.db, cluster_id=cluster_id, user_id=user_id, group_id=group_id
+        )
+        allowed = access.allowed()
+        node_pool = await node_pool_map(self.db, {d.node_id for d in devs})
+        return [d for d in devs if node_pool.get(d.node_id) in allowed]
+
+    async def _filter_node_headroom(self, devs, req_cpu: int, req_mem_gb: int):
+        """Keep only cards whose node still has host CPU/RAM for the request.
+
+        Node capacity comes from inventory (GpuNode.cpu/mem); what is already promised is the sum of
+        cpu/mem_gb over sessions holding a live resident allocation on that node's cards. A
+        NODE_RESERVED_* margin approximates the kubelet reserve and system pods. Nodes with no
+        inventory data pass — missing telemetry must not block placement.
+        """
+        if not devs or (req_cpu <= 0 and req_mem_gb <= 0):
+            return devs
+        node_ids = {d.node_id for d in devs}
+        nodes = {
+            n.id: n
+            for n in (
+                await self.db.scalars(select(GpuNode).where(GpuNode.id.in_(node_ids)))
+            ).all()
+        }
+        rows = (
+            await self.db.execute(
+                select(
+                    GpuDevice.node_id,
+                    func.coalesce(func.sum(Session.cpu), 0),
+                    func.coalesce(func.sum(Session.mem_gb), 0),
+                )
+                .select_from(Allocation)
+                .join(Session, Session.id == Allocation.session_id)
+                .join(GpuDevice, GpuDevice.id == Allocation.device_id)
+                .where(
+                    Allocation.ended_at.is_(None),
+                    Allocation.kind == "resident",
+                    GpuDevice.node_id.in_(node_ids),
+                )
+                .group_by(GpuDevice.node_id)
+            )
+        ).all()
+        used = {r[0]: (int(r[1] or 0), int(r[2] or 0)) for r in rows}
+        out = []
+        for d in devs:
+            node = nodes.get(d.node_id)
+            if node is None or (node.cpu is None and node.mem is None):
+                out.append(d)
+                continue
+            if node.status != "ready":
+                continue
+            used_cpu, used_mem = used.get(d.node_id, (0, 0))
+            cpu_ok = node.cpu is None or (
+                node.cpu - settings.NODE_RESERVED_CPU - used_cpu >= req_cpu
+            )
+            mem_ok = node.mem is None or (
+                node.mem - settings.NODE_RESERVED_MEM_GB - used_mem >= req_mem_gb
+            )
+            if cpu_ok and mem_ok:
+                out.append(d)
+        return out
+
     async def reserve_slice(self, sess: Session, req: SessionCreate) -> bool:
         """Reserve a GPU slice for a session — the primitive shared by create, dequeue, and resume.
 
@@ -709,30 +900,73 @@ class SchedulerService:
         req_mem = (sess.gpu_mem_mb if sess.gpu_mem_mb is not None else req.gpu_mem_mb) or 0
         req_cores = (sess.gpu_cores if sess.gpu_cores is not None else req.gpu_cores) or 0
         exclusive = mode == "exclusive"
-        devs = (
-            await self.db.scalars(
-                select(GpuDevice)
-                .where(
-                    GpuDevice.cluster_id == cluster_id,
-                    GpuDevice.status == "ready",
-                    GpuDevice.mode == mode,
-                    # Yielded and lent cards are out of the normal placement pool: the resident
-                    # still holds them (its pod is alive) and only spot sessions may use them. This
-                    # check holds even when inventory drift has reset used_* to 0.
-                    GpuDevice.lend_state == "",
-                )
-                .with_for_update()
+        # MIG is a POOL, not a session mode users request: a fractional request may land on a
+        # hami-core card (exact slice) or a MIG card (rounded to a profile instance). Exclusive
+        # stays hami-core only — a whole MIG-partitioned card makes no sense.
+        modes = (mode,) if mode != "fractional" else ("fractional", "mig")
+        # Mixed fleets: the session was priced and sized against ONE GPU model (the offering's),
+        # so the reservation must only consider cards of that model — otherwise a 4090 session
+        # can land on a 96GB card with the wrong rate, VRAM reference, and CUDA floor.
+        offering = await self.db.get(Offering, sess.offering_id or req.offering_id)
+        gpu_model = offering.gpu_model if offering is not None else None
+        stmt = (
+            select(GpuDevice)
+            # A cordoned/offline NODE takes no new placements even when its cards read ready —
+            # cordon and drain promise "no new scheduling", and resume re-reservation relies on it.
+            .join(GpuNode, GpuNode.id == GpuDevice.node_id, isouter=True)
+            .where(
+                or_(GpuNode.id.is_(None), GpuNode.status == "ready"),
+                GpuDevice.cluster_id == cluster_id,
+                GpuDevice.status == "ready",
+                GpuDevice.mode.in_(modes),
+                # Draining/applying cards accept no new placements (pool rebalancing).
+                GpuDevice.mode_state == "ready",
+                # Yielded and lent cards are out of the normal placement pool: the resident
+                # still holds them (its pod is alive) and only spot sessions may use them. This
+                # check holds even when inventory drift has reset used_* to 0.
+                GpuDevice.lend_state == "",
             )
-        ).all()
+        )
+        if gpu_model is not None:
+            stmt = stmt.where(GpuDevice.model == gpu_model)
+        devs = (await self.db.scalars(stmt.with_for_update(of=GpuDevice))).all()  # outer-joined GpuNode must stay unlocked (PG forbids FOR UPDATE on the nullable side)
         await self._reconcile_device_usage(devs)  # correct counter drift before deciding
+        # Host-side gate: drop cards whose node lacks CPU/RAM for this session's compute request,
+        # so it queues here instead of the pod sitting Pending on hami-scheduler forever.
+        had_cards = bool(devs)
+        devs = await self._filter_node_headroom(
+            devs,
+            (sess.cpu if sess.cpu is not None else req.cpu) or 0,
+            (sess.mem_gb if sess.mem_gb is not None else req.mem_gb) or 0,
+        )
+        # Node pools: place tier by tier — group-granted pools, then org-granted, then shared
+        # (see app.domain.node_pools) — so a tenant fills its own nodes before spilling onto the
+        # shared pool. Cards in pools outside the allowed set are never candidates.
+        access = await resolve_pool_access(
+            self.db, cluster_id=cluster_id, user_id=sess.owner_user_id, group_id=sess.group_id
+        )
+        node_pool = await node_pool_map(self.db, {d.node_id for d in devs})
         # Exclusive: reserve one completely empty card whole (used = total) so no_overcommit blocks
         # co-tenancy. Fractional: best-fit the slice onto a card, allowing several sessions per
         # card.
-        target, eff_mem, eff_cores = self._reserve_target(devs, req_mem, req_cores, exclusive)
+        target, eff_mem, eff_cores = None, 0, 0
+        for tier in access.tiers:
+            cands = [d for d in devs if node_pool.get(d.node_id) in tier]
+            if not cands:
+                continue
+            target, eff_mem, eff_cores = self._reserve_target(cands, req_mem, req_cores, exclusive)
+            if target is not None:
+                break
         if target is None:
+            # Transient: tells the queued event WHY there was no fit — every card full vs the
+            # host-side CPU/RAM gate emptying an otherwise non-empty candidate list.
+            sess._no_fit_reason = "host_headroom" if had_cards and not devs else "no_gpu_capacity"
             return False
         target.used_mem_mb += eff_mem
         target.used_cores += eff_cores
+        # Per-card pools: the handoff pins the pod to this exact card (spec.pinnedGpuUuid).
+        # Transient attribute — the durable record is the Allocation row below.
+        sess._pinned_gpu_uuid = target.gpu_uuid
         self.db.add(
             Allocation(
                 id=ids.new("allocation"),
@@ -766,18 +1000,22 @@ class SchedulerService:
         req_mem = sess.gpu_mem_mb or req.gpu_mem_mb or 0
         req_cores = sess.gpu_cores or req.gpu_cores or 0
         # Lock the yielded and lent cards for atomicity, and place on the first one that fits.
-        devs = (
-            await self.db.scalars(
-                select(GpuDevice)
-                .where(
-                    GpuDevice.cluster_id == cluster_id,
-                    GpuDevice.status == "ready",
-                    GpuDevice.mode == "exclusive",
-                    GpuDevice.lend_state.in_(("yielded", "lent")),
-                )
-                .with_for_update()
-            )
-        ).all()
+        spot_offering = await self.db.get(Offering, sess.offering_id or req.offering_id)
+        spot_model = spot_offering.gpu_model if spot_offering is not None else None
+        spot_stmt = select(GpuDevice).join(GpuNode, GpuNode.id == GpuDevice.node_id, isouter=True).where(
+            or_(GpuNode.id.is_(None), GpuNode.status == "ready"),   # cordoned/offline nodes lend nothing
+            GpuDevice.cluster_id == cluster_id,
+            GpuDevice.status == "ready",
+            GpuDevice.mode == "exclusive",
+            GpuDevice.lend_state.in_(("yielded", "lent")),
+        )
+        if spot_model is not None:
+            # Mixed fleets: a spot session priced for one model only borrows that model's cards.
+            spot_stmt = spot_stmt.where(GpuDevice.model == spot_model)
+        devs = (await self.db.scalars(spot_stmt.with_for_update(of=GpuDevice))).all()  # see above: lock devices only
+        # Node pools: a spot session borrows only cards its tenant may place on (no tier order —
+        # any allowed yielded card is fine).
+        devs = await self._filter_pool_access(devs, cluster_id, sess.owner_user_id, sess.group_id)
         for dev in devs:
             # Existing borrow usage on this card. Resident occupancy is ignored: the card is free.
             borrows = (
@@ -833,28 +1071,48 @@ class SchedulerService:
         from app.domain.session_service import SessionService  # lazy: avoid import cycle
 
         cluster_id = sess.cluster_id or req.cluster_id
-        victim_id = await self.db.scalar(
-            select(Session.id)
-            .join(Allocation, Allocation.session_id == Session.id)
-            .join(GpuDevice, GpuDevice.id == Allocation.device_id)
-            .where(
-                Session.cluster_id == cluster_id,
-                Session.status == "running",
-                Session.mode == "exclusive",
-                Session.pause_mode == "yield",
-                Session.priority < sess.priority,
-                Session.deleted_at.is_(None),
-                Allocation.ended_at.is_(None),
-                Allocation.kind == "resident",
-                GpuDevice.lend_state == "",
+        # Own transaction for the read: a bare scalar() would autobegin and leave the tx open,
+        # colliding with the caller's next begin() when no victim is found.
+        async with self.db.begin():
+            # Node pools: only a card the requester may borrow afterwards is worth yielding —
+            # otherwise the victim would be paused for nothing (reserve_spot_slice would drop
+            # the card for a tenant outside its pool). Same allowed set as the spot path.
+            access = await resolve_pool_access(
+                self.db, cluster_id=cluster_id, user_id=sess.owner_user_id, group_id=sess.group_id
             )
-            .order_by(Session.priority.asc())
-            .limit(1)
-        )
+            allowed = access.allowed()
+            pool_conds = []
+            if None in allowed:
+                pool_conds.append(GpuNode.pool_id.is_(None))
+            pool_ids = [p for p in allowed if p is not None]
+            if pool_ids:
+                pool_conds.append(GpuNode.pool_id.in_(pool_ids))
+            if not pool_conds:
+                return False
+            victim_id = await self.db.scalar(
+                select(Session.id)
+                .join(Allocation, Allocation.session_id == Session.id)
+                .join(GpuDevice, GpuDevice.id == Allocation.device_id)
+                .join(GpuNode, GpuNode.id == GpuDevice.node_id)
+                .where(
+                    or_(*pool_conds),
+                    Session.cluster_id == cluster_id,
+                    Session.status == "running",
+                    Session.mode == "exclusive",
+                    Session.pause_mode == "yield",
+                    Session.priority < sess.priority,
+                    Session.deleted_at.is_(None),
+                    Allocation.ended_at.is_(None),
+                    Allocation.kind == "resident",
+                    GpuDevice.lend_state == "",
+                )
+                .order_by(Session.priority.asc())
+                .limit(1)
+            )
         if victim_id is None:
             return False
         try:
-            await SessionService(self.db).stop(victim_id)  # lossless yield; the card becomes lend_state=yielded
+            await SessionService(self.db).stop(victim_id, reason="preempted")  # lossless yield; the card becomes lend_state=yielded
         except Exception:  # noqa: BLE001 — a failed preemption only drops the requester into the queue
             log.exception("preempt: victim yield failed session=%s", victim_id)
             return False
@@ -866,25 +1124,82 @@ class SchedulerService:
         """Choose the card to reserve and the occupancy to record (eff_mem, eff_cores).
 
         Exclusive: pick a completely empty card and occupy its **entire capacity**, which blocks
-        co-tenancy; None when no card qualifies. Fractional: best-fit the slice onto a card, which
-        several sessions may share."""
+        co-tenancy; None when no card qualifies. Fractional: MIG cards are preferred when the
+        request aligns to a hardware profile (hardware isolation at no capacity cost — the ledger
+        reserves the ROUNDED profile size so a MIG card never advertises phantom headroom);
+        otherwise best-fit onto a hami-core card, which several sessions share at exact sizes."""
         if exclusive:
             free = [d for d in devs if d.used_mem_mb == 0 and d.used_cores == 0]
             if not free:
                 return None, 0, 0
             d = free[0]
             return d, d.total_mem_mb, d.total_cores
-        d = SchedulerService._pick_device(devs, req_mem, req_cores)
-        if d is None:
-            return None, 0, 0
-        return d, req_mem, req_cores
+        mig = [d for d in devs if getattr(d, "mode", None) == "mig"]
+        core = [d for d in devs if getattr(d, "mode", None) != "mig"]
+        if mig:
+            for d in sorted(mig, key=lambda d: d.total_mem_mb - d.used_mem_mb):
+                rounded = SchedulerService._mig_rounded(d, req_mem, req_cores)
+                if rounded is None:
+                    continue
+                r_mem, r_cores = rounded
+                if (d.total_mem_mb - d.used_mem_mb) >= r_mem and (
+                    (d.total_cores or 100) - d.used_cores
+                ) >= r_cores:
+                    # Prefer MIG only when the request IS profile-aligned (no rounding waste);
+                    # a rounded-up request falls through to exact hami-core placement first.
+                    if r_mem == req_mem:
+                        return d, r_mem, r_cores
+        d = SchedulerService._pick_device(core, req_mem, req_cores)
+        if d is not None:
+            return d, req_mem, req_cores
+        # No hami-core capacity: accept a MIG rounding as the fallback.
+        for d in sorted(mig, key=lambda dd: dd.total_mem_mb - dd.used_mem_mb):
+            rounded = SchedulerService._mig_rounded(d, req_mem, req_cores)
+            if rounded is None:
+                continue
+            r_mem, r_cores = rounded
+            if (d.total_mem_mb - d.used_mem_mb) >= r_mem and (
+                (d.total_cores or 100) - d.used_cores
+            ) >= r_cores:
+                return d, r_mem, r_cores
+        return None, 0, 0
 
-    async def _release_reservation(self, session_id: str) -> None:
+    @staticmethod
+    def _mig_rounded(dev, req_mem: int, req_cores: int):
+        """Round a request UP to the card's smallest fitting MIG instance, or None.
+
+        Profiles are modelled as the 1/4, 1/2, and full fractions of the card (RTX PRO 6000
+        Blackwell: 1g.24gb / 2g.48gb / 4g.96gb; A100/H100 quarters land on the same fractions
+        closely enough for capacity accounting — HAMi's knownMigGeometries does the real carving).
+        """
+        total = dev.total_mem_mb or 0
+        if total <= 0 or req_mem <= 0 or req_mem > total:
+            return None
+        for frac in (4, 2, 1):
+            size = total // frac
+            if req_mem <= size:
+                return size, max(req_cores, 100 // frac)
+        return None
+
+    async def _refund_stranded_hold(self, session_id: str) -> None:
+        """Release the credit hold a failed create/promotion left behind.
+
+        settle() is idempotent (settle:{ses}) and a no-op when no hold was ever taken, so this is
+        safe whether the failure happened before or after the hold step. Without it the reserved
+        credit of an error row is stuck forever (error rows never reach terminate())."""
+        try:
+            sess = await self.db.get(Session, session_id)
+            if sess is not None and sess.billing_wallet_id and sess.credit_per_hour_snapshot:
+                await self.credit.settle(sess, key=f"settle:{sess.id}")
+        except Exception:  # noqa: BLE001 — refund is best-effort; the row is already marked error
+            log.warning("stranded-hold settle failed for %s", session_id)
+
+    async def _release_reservation(self, session_id: str, reason: str | None = None) -> None:
         """Release a reservation so a failed handoff cannot leak one.
 
         Closes the live allocation as released, rolls device.used back, and marks the session
-        `error`. Without this, a handoff that fails after the reservation commits leaves a zombie
-        allocation behind."""
+        `error` (with `reason` as its status_reason, when none is set yet). Without this, a
+        handoff that fails after the reservation commits leaves a zombie allocation behind."""
         async with self.db.begin():
             alloc = (
                 await self.db.scalars(
@@ -899,11 +1214,15 @@ class SchedulerService:
                     if dev is not None:
                         dev.used_mem_mb = max(0, dev.used_mem_mb - (alloc.gpu_mem_mb or 0))
                         dev.used_cores = max(0, dev.used_cores - (alloc.gpu_cores or 0))
+                        maybe_apply_drained_mode(dev)
                 alloc.status = "released"
                 alloc.ended_at = datetime.now(UTC)
             sess = await self.db.get(Session, session_id, with_for_update=True)
             if sess is not None and sess.status in ("pending", "preparing"):
                 sess.status = "error"
+                if reason and not sess.status_reason:
+                    sess.status_reason = reason
+                record_session_event(self.db, session_id, "error", reason=sess.status_reason)
 
     @staticmethod
     def _pick_device(devs, req_mem: int, req_cores: int):
@@ -939,14 +1258,11 @@ class SchedulerService:
     async def _estimate(self, req: SessionCreate) -> _Estimate:
         """Estimate unit price + 1h hold amount = credit_per_hour * occupancy."""
         offering = await self.db.get(Offering, req.offering_id)
-        # CPU session: priced proportionally to cpu/mem/disk at occupancy 1.0, since it takes the
-        # whole allocation. The hold covers one hour.
+        # CPU session: free — host cpu/mem/disk are quota-governed, not billed.
         if req.resource_class == "cpu":
-            cpu_v = req.cpu if req.cpu is not None else (offering.cpu if offering is not None else None)
-            mem_v = req.mem_gb if req.mem_gb is not None else (offering.mem_gb if offering is not None else None)
-            disk_v = req.disk_gb if req.disk_gb is not None else (offering.disk_gb if offering is not None else None)
-            cph = compute_credit_per_hour(cpu_v, mem_v, disk_v)   # already an integer
-            return _Estimate(credit_per_hour=cph, occupancy=1.0, hold_amount=cph)
+            return _Estimate(
+                credit_per_hour=Decimal("0"), occupancy=1.0, hold_amount=Decimal("0")
+            )
         cph = offering.credit_per_hour if offering is not None else Decimal("0")
         denom = (offering.gpu_mem_mb if offering and offering.gpu_mem_mb else None) or (
             req.gpu_mem_mb or 0
@@ -970,33 +1286,9 @@ class SchedulerService:
                 chain.append(("org", project.org_id))
         return chain
 
-    async def _policy_for(self, req: SessionCreate, principal: Principal) -> ResourcePolicy | None:
-        """Most-specific policy wins: user, then group, then organization, then global."""
-        async def _scoped(scope: str, scope_id: str) -> ResourcePolicy | None:
-            return (
-                await self.db.scalars(
-                    select(ResourcePolicy).where(
-                        ResourcePolicy.scope == scope, ResourcePolicy.scope_id == scope_id
-                    )
-                )
-            ).first()
-
-        # 1. User
-        pol = await _scoped("user", principal.user_id)
-        if pol is not None:
-            return pol
-        # 2. Group, then 3. organization (derived from the group)
-        if req.group_id:
-            pol = await _scoped("group", req.group_id)
-            if pol is not None:
-                return pol
-            project = await self.db.get(Project, req.group_id)
-            if project is not None and project.org_id:
-                pol = await _scoped("org", project.org_id)
-                if pol is not None:
-                    return pol
-        # 4. Global, applied only when no more specific policy exists.
-        return await _scoped("global", "*")
+    async def _policy_for(self, req: SessionCreate, principal: Principal) -> EffectivePolicy | None:
+        """Per-field most-specific-wins merge over user → group → org → global (domain.policy)."""
+        return await resolve_effective_policy(self.db, principal.user_id, req.group_id)
 
     async def _check_quota(
         self, req: SessionCreate, principal: Principal, exclude_session_id: str | None = None
@@ -1010,22 +1302,25 @@ class SchedulerService:
         if pol is None:
             return
         if pol.max_concurrent is not None:
+            # `active` excludes the session being admitted, so admitting it makes active+1:
+            # reject when the cap is already met (>= — `>` off-by-one allowed cap+1 sessions).
             active = await self._count_active(principal, req, exclude_session_id)
-            if active > pol.max_concurrent:
+            if active >= pol.max_concurrent:
                 raise QuotaExceeded(
                     "max_concurrent exceeded",
                     {"limit": pol.max_concurrent, "active": active},
                 )
         if pol.max_queued is not None:
-            queued = await self._count_queued(req)
-            if queued > pol.max_queued:
+            # The new entry is not enqueued yet, so >= for the same reason as max_concurrent.
+            queued = await self._count_queued(principal, req)
+            if queued >= pol.max_queued:
                 raise QuotaExceeded(
                     "max_queued exceeded", {"limit": pol.max_queued, "queued": queued}
                 )
         await self._check_resource_sum(req, principal, pol, exclude_session_id)
 
     async def _check_resource_sum(
-        self, req: SessionCreate, principal: Principal, pol: ResourcePolicy,
+        self, req: SessionCreate, principal: Principal, pol: EffectivePolicy,
         exclude_session_id: str | None = None,
     ) -> None:
         """Check the policy's aggregate resource limits.
@@ -1038,8 +1333,7 @@ class SchedulerService:
         if not any((limits.get(k) or 0) > 0 for k in keys):
             return  # no limit configured, nothing to check
 
-        scope_col = Session.group_id if req.group_id else Session.owner_user_id
-        scope_val = req.group_id if req.group_id else principal.user_id
+        # Per-user sums, matching _count_active (see the comment there).
         row = (
             await self.db.execute(
                 select(
@@ -1049,7 +1343,7 @@ class SchedulerService:
                     func.coalesce(func.sum(Session.mem_gb), 0),
                     func.coalesce(func.sum(Session.disk_gb), 0),
                 ).where(
-                    scope_col == scope_val,
+                    Session.owner_user_id == principal.user_id,
                     Session.status.in_(
                         ("pending", "preparing", "running", "paused", "terminating")
                     ),
@@ -1085,31 +1379,39 @@ class SchedulerService:
     async def _check_cpu_quota(
         self, req: SessionCreate, principal: Principal, exclude_session_id: str | None = None
     ) -> None:
-        """CPU session: the concurrent-CPU-session cap plus the aggregate cpu/mem/storage limits."""
+        """CPU session: the session cap, the CPU-specific cap, and the aggregate cpu/mem/storage
+        limits. A free session is still governed — it holds host CPU, memory and disk."""
         pol = await self._policy_for(req, principal)
         if pol is None:
             return
+        if pol.max_concurrent is not None:
+            active = await self._count_active(principal, req, exclude_session_id)
+            if active >= pol.max_concurrent:
+                raise QuotaExceeded(
+                    "max_concurrent exceeded",
+                    {"limit": pol.max_concurrent, "active": active},
+                )
+        # An administrator may tighten CPU sessions further than the overall cap.
+        cpu_cap = (pol.limits or {}).get("cpu_session_max_concurrent")
+        if cpu_cap:
+            active_cpu = await self._count_active_cpu(principal, exclude_session_id)
+            if active_cpu >= int(cpu_cap):
+                raise QuotaExceeded(
+                    "cpu_session_max_concurrent exceeded",
+                    {"limit": int(cpu_cap), "active": active_cpu},
+                )
         await self._check_resource_sum(req, principal, pol, exclude_session_id)
-        if pol.max_concurrent is None:
-            return
-        active = await self._count_active(principal, req, exclude_session_id)
-        if active > pol.max_concurrent:
-            raise QuotaExceeded(
-                "cpu_session_max exceeded",
-                {"limit": pol.max_concurrent, "active": active},
-            )
 
-    async def _count_active(
-        self, principal: Principal, req: SessionCreate, exclude_session_id: str | None = None
+    async def _count_active_cpu(
+        self, principal: Principal, exclude_session_id: str | None = None
     ) -> int:
-        scope_col = Session.group_id if req.group_id else Session.owner_user_id
-        scope_val = req.group_id if req.group_id else principal.user_id
+        """The caller's live CPU-only sessions, for the cpu-specific cap."""
         result = await self.db.scalar(
             select(func.count())
             .select_from(Session)
             .where(
-                scope_col == scope_val,
-                Session.resource_class == req.resource_class,
+                Session.owner_user_id == principal.user_id,
+                Session.resource_class == "cpu",
                 Session.status.in_(
                     ("pending", "preparing", "running", "paused", "terminating")
                 ),
@@ -1119,20 +1421,41 @@ class SchedulerService:
         )
         return int(result or 0)
 
-    async def _count_queued(self, req: SessionCreate) -> int:
-        stmt = (
+    async def _count_active(
+        self, principal: Principal, req: SessionCreate, exclude_session_id: str | None = None
+    ) -> int:
+        # Caps are PER USER, always: a group here is a course roster, not a shared resource
+        # tenant, so max_concurrent=N must mean N per student — never N across the whole class.
+        result = await self.db.scalar(
+            select(func.count())
+            .select_from(Session)
+            .where(
+                Session.owner_user_id == principal.user_id,
+                # NOT filtered by resource_class: max_concurrent counts SESSIONS. Filtering by
+                # class let a student hold one GPU session and any number of CPU sessions while
+                # the console showed "2 / 1" — the cap and the display must agree.
+                Session.status.in_(
+                    ("pending", "preparing", "running", "paused", "terminating")
+                ),
+                Session.deleted_at.is_(None),
+                Session.id != exclude_session_id if exclude_session_id else true(),
+            )
+        )
+        return int(result or 0)
+
+    async def _count_queued(self, principal: Principal, req: SessionCreate) -> int:
+        # Per user, like every other cap (was per group — or GLOBAL with no group, letting one
+        # user's backlog consume the whole queue allowance of everyone else).
+        result = await self.db.scalar(
             select(func.count())
             .select_from(QueueEntry)
             .join(Session, Session.id == QueueEntry.session_id)
+            .where(Session.owner_user_id == principal.user_id)
         )
-        if req.group_id:
-            stmt = stmt.where(Session.group_id == req.group_id)
-        result = await self.db.scalar(stmt)
         return int(result or 0)
 
     async def _enqueue(self, sess: Session, req: SessionCreate) -> None:
-        """Persist a QueueEntry + ZADD gshare:queue (score = weight*priority + aging)."""
-        priority = 0
+        """Persist a QueueEntry — the PG row IS the queue; order derives from queue_ranking."""
         entry = (
             await self.db.scalars(
                 select(QueueEntry).where(QueueEntry.session_id == sess.id)
@@ -1143,30 +1466,31 @@ class SchedulerService:
                 id=ids.new("queue"),
                 session_id=sess.id,
                 session_req=req.model_dump(mode="json"),
-                priority=priority,
+                # Session priority carries into queue order (one band per priority step); it was
+                # already clamped to the caller's permission level at create time.
+                priority=sess.priority or 0,
             )
             self.db.add(entry)
             await self.db.flush()
             # Notify the owner once, on the first enqueue only.
             from app.domain.notification_service import NotificationService
 
+            record_session_event(self.db, sess.id, "queued",
+                                 reason=getattr(sess, "_no_fit_reason", None))
             await NotificationService(self.db).notify(
                 [sess.owner_user_id], "session_queued", "Session queued",
                 f"Session '{sess.name or sess.id}' was queued: not enough capacity right now.",
                 session_id=sess.id,
             )
-        else:
-            priority = entry.priority
-        score = PRIORITY_WEIGHT * priority + self._aging()
-        await get_redis().zadd(QUEUE_KEY, {sess.id: score})
+        await self._publish_queue_event("enqueued", sess.id)
 
     @staticmethod
-    def _aging() -> float:
-        """Aging term: earlier enqueue -> higher score within same priority (FIFO fairness).
-
-        Use negative wall-clock seconds so that older entries (smaller timestamp) rank higher.
-        """
-        return -time.time()
+    async def _publish_queue_event(kind: str, session_id: str) -> None:
+        """Best-effort ping on the queue:events channel (admin monitor + queue views refetch)."""
+        try:
+            await get_redis().publish("queue:events", f'{{"kind":"{kind}","session_id":"{session_id}"}}')
+        except Exception:  # noqa: BLE001 — a missed ping only delays a refetch
+            pass
 
     def _req_from_entry(self, entry: QueueEntry | None, sess: Session) -> SessionCreate:
         """Rebuild the SessionCreate for re-admission (from stored session_req or the row)."""

@@ -33,7 +33,7 @@ def _super() -> Principal:
 def _sub(sid: str, org_id: str | None) -> WebhookSubscription:
     return WebhookSubscription(
         id=sid, org_id=org_id, scope="{}", url=f"https://{sid}",
-        events={"events": ["budget.exceeded"]}, secret=_SECRET, status="active",
+        events={"events": ["session.status_changed"]}, secret=_SECRET, status="active",
     )
 
 
@@ -61,15 +61,15 @@ async def test_delete_cross_org_denied(db):
 
 
 async def test_create_outside_org_denied(db):
-    other = WebhookCreate(url="https://x", events=["budget.exceeded"], secret=_SECRET, org_id="org_B")
+    other = WebhookCreate(url="https://x", events=["session.status_changed"], secret=_SECRET, org_id="org_B")
     with pytest.raises(Forbidden):
         await create_webhook(body=other, principal=_org_admin("org_A"), db=db)
-    glob = WebhookCreate(url="https://x", events=["budget.exceeded"], secret=_SECRET, org_id=None)
+    glob = WebhookCreate(url="https://x", events=["session.status_changed"], secret=_SECRET, org_id=None)
     with pytest.raises(Forbidden):  # global is super-only
         await create_webhook(body=glob, principal=_org_admin("org_A"), db=db)
 
 
 async def test_create_own_org_ok(db):
-    body = WebhookCreate(url="https://x", events=["budget.exceeded"], secret=_SECRET, org_id="org_A")
+    body = WebhookCreate(url="https://x", events=["session.status_changed"], secret=_SECRET, org_id="org_A")
     out = await create_webhook(body=body, principal=_org_admin("org_A"), db=db)
     assert out["org_id"] == "org_A"

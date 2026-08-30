@@ -10,6 +10,7 @@ class OperatorStatusEvent(BaseModel):
     """Status callback payload. Drives consume/settle triggers."""
     phase: str                          # running|terminated|error|preparing|terminating
     bound_gpu_uuid: str | None = None   # physical GPU bound on running
+    node_name: str | None = None        # k8s node the pod landed on (pod.spec.nodeName)
     yield_state: str | None = None      # "Yielded" if operator did an in-place yield (not cold)
     pod_ref: str | None = None          # "namespace/name"
     used_mem_mb: int | None = None      # measured occupancy (inventory reconciliation)
@@ -50,6 +51,7 @@ class OperatorNodeUpsert(BaseModel):
     node_mem_gb: int | None = None
     node_disk_gb: int | None = None
     lossless_capable: bool = False      # lossless-pause prerequisites (cuda-checkpoint plus CRIU) are labelled ready on the node
+    role: str | None = None             # master|gpu|cpu|storage, from node labels/devices
 
 
 class OperatorNodeHealthEvent(BaseModel):
@@ -76,3 +78,47 @@ class OperatorAuditEvent(BaseModel):
     detail: dict | None = None
     trace_id: str | None = None
     ts: datetime
+
+
+class OperatorVolumeObserved(BaseModel):
+    """One PVC the operator sees in the session namespace (label gshare.io/volume)."""
+
+    name: str                           # PVC name (the sanitized volume id: vol-01abc...)
+    volume_id: str | None = None        # the ledger id when the PVC carries it (gshare.io/volume-id)
+    capacity_gb: int = 0                # the claim's current size
+    used_bytes: int | None = None       # kubelet volume stats; None when nothing has it mounted
+    mounted: bool = False               # some pod currently mounts it
+
+
+class OperatorSessionDisk(BaseModel):
+    """Ephemeral (scratch) disk usage of one session pod, read from kubelet /stats/summary.
+
+    ``name`` is the GShareSession CR name — the sanitized session id (``ses-01abc...``).
+    """
+
+    name: str
+    ephemeral_used_bytes: int
+    ephemeral_limit_bytes: int
+
+
+class OperatorVolumeSync(BaseModel):
+    """POST /internal/volumes/sync — the operator's periodic view of every session-volume PVC."""
+
+    volumes: list[OperatorVolumeObserved]
+    cluster_id: str | None = None
+    # Per-session scratch-disk usage, piggybacked on the same tick. Old operators omit it.
+    sessions: list[OperatorSessionDisk] = []
+
+
+class VolumeSyncDirective(BaseModel):
+    """What the control plane wants for one observed PVC."""
+
+    name: str
+    volume_id: str | None = None
+    quota_gb: int | None = None         # desired size; the operator grows the claim up to it
+    reclaim: bool = False               # deleted past the grace window: drop the PVC and its data
+
+
+class VolumeSyncResponse(BaseModel):
+    volumes: list[VolumeSyncDirective]
+    orphans: int = 0                    # PVCs no ledger row explains; kept, surfaced for an admin

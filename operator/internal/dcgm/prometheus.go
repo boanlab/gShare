@@ -21,9 +21,12 @@ import (
 )
 
 // utilMetric is the DCGM exporter gauge (percent, 0–100); utilLabel is the GPU-UUID label.
+// utilMetricMIG covers MIG-enabled cards, where DCGM_FI_DEV_GPU_UTIL is not exported: the
+// graphics-engine-active ratio (0–1) per instance, max-ed over the card's instances.
 const (
-	utilMetric = "DCGM_FI_DEV_GPU_UTIL"
-	utilLabel  = "UUID"
+	utilMetric    = "DCGM_FI_DEV_GPU_UTIL"
+	utilMetricMIG = "DCGM_FI_PROF_GR_ENGINE_ACTIVE"
+	utilLabel     = "UUID"
 )
 
 // Prometheus queries a DCGM exporter via the Prometheus HTTP API.
@@ -60,8 +63,14 @@ func (p *Prometheus) GPUUtil(ctx context.Context, gpuUUID string) float64 {
 	if gpuUUID == "" || p.BaseURL == "" {
 		return 1.0
 	}
-	q := fmt.Sprintf(`max_over_time(%s{%s="%s"}[%ds])`,
-		utilMetric, utilLabel, gpuUUID, int(p.Window.Seconds()))
+	// On MIG-enabled cards DCGM_FI_DEV_GPU_UTIL is absent; fall back to the per-instance
+	// engine-active ratio (already 0–1), max-ed across the card's instances, in ONE query so a
+	// metrics round trip stays a single request either way.
+	q := fmt.Sprintf(
+		`max_over_time(%s{%s="%s"}[%ds]) or (100 * max(max_over_time(%s{%s="%s"}[%ds])))`,
+		utilMetric, utilLabel, gpuUUID, int(p.Window.Seconds()),
+		utilMetricMIG, utilLabel, gpuUUID, int(p.Window.Seconds()),
+	)
 	endpoint := p.BaseURL + "/api/v1/query?query=" + url.QueryEscape(q)
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)

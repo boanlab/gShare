@@ -52,6 +52,9 @@ from app.api import (
     groups_router,
     images_router,
     infra_router,
+    inquiries_router,
+    monitoring_router,
+    notices_router,
     notifications_router,
     offerings_router,
     policies_router,
@@ -63,6 +66,7 @@ from app.api import (
     webhooks_router,
 )
 from app.core.errors import register_exception_handlers
+from app.core.metrics import instrument
 from app.internal import internal_router
 
 # Public REST routers mounted under /api/v1.
@@ -80,22 +84,26 @@ API_ROUTERS = (
     clusters_router,
     images_router,
     notifications_router,
+    notices_router,
+    inquiries_router,
     audit_router,
     webhooks_router,
     dashboard_router,
     infra_router,
+    monitoring_router,
 )
 
 
 def create_app() -> FastAPI:
     app = FastAPI(
-        title="GShare API",
+        title="gShare API",
         version="v1",
         docs_url="/api/v1/docs",
         openapi_url="/api/v1/openapi.json",
         lifespan=_lifespan,
     )
     register_exception_handlers(app)
+    instrument(app)   # /metrics + request-latency histogram (scraped pod-direct, not via ingress)
 
     @app.middleware("http")
     async def _request_id(request: Request, call_next):  # noqa: ANN202

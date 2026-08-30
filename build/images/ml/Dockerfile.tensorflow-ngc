@@ -1,0 +1,28 @@
+# TensorFlow with Blackwell (sm_120) support: NVIDIA NGC's TF build (25.xx line supports Blackwell),
+# plus the three GShare connection tools. Hub's tensorflow/tensorflow images ship an older CUDA and
+# do not run on RTX PRO 5000/6000. Catalogue entry: cuda_version=12.8.
+# Build context: build/images, so session-base/entrypoint.sh can be shared.
+FROM codercom/code-server:latest AS cs
+
+FROM nvcr.io/nvidia/tensorflow:25.02-tf2-py3
+ARG TTYD_VERSION=1.7.7
+
+COPY --from=cs /usr/lib/code-server /usr/lib/code-server
+COPY --from=cs /usr/bin/code-server /usr/bin/code-server
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      tini ca-certificates wget git iproute2 && \
+    rm -rf /var/lib/apt/lists/* && \
+    (id -un 1000 >/dev/null 2>&1 && usermod -l coder -d /home/coder -m "$(id -un 1000)") || \
+    useradd -m -u 1000 -s /bin/bash coder
+RUN pip install --no-cache-dir jupyterlab notebook pandas matplotlib scikit-learn
+RUN wget -qO /usr/local/bin/ttyd \
+      "https://github.com/tsl0922/ttyd/releases/download/${TTYD_VERSION}/ttyd.x86_64" && \
+    chmod +x /usr/local/bin/ttyd
+
+COPY session-base/entrypoint.sh /usr/local/bin/gshare-session
+RUN chmod +x /usr/local/bin/gshare-session
+
+USER 1000
+ENV HOME=/home/coder
+EXPOSE 8080 8888 7681
+ENTRYPOINT ["tini", "--", "/usr/local/bin/gshare-session"]

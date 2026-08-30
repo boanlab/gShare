@@ -2,49 +2,93 @@
 @tailwind components;
 @tailwind utilities;
 
-/* The theme, expressed as CSS variables, in light and dark. */
+/* ---------------------------------------------------------------------------
+   gShare console theme, second pass: a dark-first infrastructure console.
+
+   Direction: the developer-infrastructure language of a GPU cloud. Cool
+   neutrals under a single cyan accent, hairlines instead of drop shadows,
+   JetBrains Mono wherever a number carries meaning. Light mode is the same
+   identity on cool technical paper, not a separate design.
+
+   Shape rule (applied everywhere, no exceptions):
+     controls (button, input, select) .... 4px  (--radius-control, rounded-ctl)
+     panels and cards ................... 6px  (--radius, rounded-card)
+     tags, badges (incl. .gs-pill) ...... 2px  (--radius-tag, rounded-tag)
+     true circles only .................. status dots, notification count, step markers
+     pills .............................. full, STATUS meaning only
+
+   Colour rule: ONE accent (--primary, cyan). Green/amber/red are reserved for
+   status meaning (running, warning, danger) and are never used decoratively.
+   Every foreground below is checked for WCAG AA against the surface it sits on.
+--------------------------------------------------------------------------- */
 :root {
-  --bg: #f7f8fa;
+  --bg: #f3f5f7;
   --surface: #ffffff;
-  --surface-2: #f4f5f7;
-  --border: #e5e7eb;
-  --text: #111827;
-  /* Foregrounds are chosen for WCAG AA against their own soft background, not against white. */
-  --muted: #5a6270;
-  --primary: #4f46e5;
-  --primary-soft: #eef2ff;
-  --gpu: #4f46e5;
-  --gpu-soft: #eef2ff;
-  --free: #067a53;
-  --free-soft: #e9f5ef;
-  --warn: #8a5600;
-  --warn-soft: #fbf3e6;
-  --danger: #b91c1c;
-  --danger-soft: #fceced;
-  --ok: #067a53;
-  --shadow: 0 1px 2px rgba(17, 24, 39, 0.04), 0 1px 3px rgba(17, 24, 39, 0.06);
-  --radius: 12px;
+  --surface-2: #e9edf1;
+  --border: #d7dde3;
+  /* Controls need a 3:1 boundary (WCAG 1.4.11); hairlines between rows do not. */
+  --border-strong: #7d8792;
+  --text: #171a1f;
+  --muted: #5b6470;
+
+  /* Deep enough to clear 4.5:1 AA for small text on every light surface it sits on,
+     including the tinted ones (primary-soft 5.30, surface-2 5.17, bg 5.56, surface 6.08). */
+  --primary: #0a6a8c;
+  --primary-soft: #e2f2f8;
+  /* Text sitting ON a primary fill: white passes on the light azure, near-black on the dark cyan. */
+  --on-primary: #ffffff;
+  --free: #0a6b45;
+  --free-soft: #e3f2ea;
+  --warn: #8a5a00;
+  --warn-soft: #f8f0dd;
+  --danger: #b02020;
+  --danger-soft: #fbe9e9;
+  --ok: var(--free);
+
+  --shadow: 0 1px 2px rgba(23, 26, 31, 0.06);
+  --shadow-raised: 0 8px 24px -12px rgba(23, 26, 31, 0.28);
+  --radius: 6px;
+  --radius-control: 4px;
+  --radius-tag: 2px;
+
+  --font-sans: 'Pretendard Variable', Pretendard, ui-sans-serif, system-ui, -apple-system,
+    'Segoe UI', Roboto, 'Malgun Gothic', sans-serif;
+  --font-mono: 'JetBrains Mono', ui-monospace, 'SF Mono', SFMono-Regular, Menlo, 'Cascadia Mono',
+    'Segoe UI Mono', 'Roboto Mono', monospace;
 }
 
+/* Dark is the primary mode; the light block above mirrors it token for token. */
 html[data-theme='dark'] {
-  --bg: #0f1218;
-  --surface: #171a21;
-  --surface-2: #1e222b;
-  --border: #2b303b;
-  --text: #e7e9ee;
-  --muted: #9aa1ad;
-  --primary: #7c8aff;
-  --primary-soft: #23263a;
-  --gpu: #7c8aff;
-  --gpu-soft: #23263a;
-  --free: #34c08a;
-  --free-soft: #11251c;
-  --warn: #d89636;
-  --warn-soft: #2a2210;
-  --danger: #e06666;
-  --danger-soft: #2a1616;
-  --ok: #34c08a;
-  --shadow: 0 1px 2px rgba(0, 0, 0, 0.25), 0 6px 18px rgba(0, 0, 0, 0.3);
+  --bg: #0c0e11;
+  --surface: #14171c;
+  --surface-2: #1b1f26;
+  --border: #262b33;
+  --border-strong: #5d6672;
+  --text: #e7eaee;
+  --muted: #8d95a2;
+
+  --primary: #45c4e8;
+  --primary-soft: #0f2a34;
+  --on-primary: #08262e;
+  --free: #41c98a;
+  --free-soft: #10281d;
+  --warn: #e0a94f;
+  --warn-soft: #2b2312;
+  --danger: #f07575;
+  --danger-soft: #2d1717;
+  --ok: var(--free);
+
+  --shadow: 0 1px 2px rgba(0, 0, 0, 0.45);
+  --shadow-raised: 0 12px 32px -16px rgba(0, 0, 0, 0.75);
+}
+
+/* Pretendard Variable's 700 instance mis-kerns some Latin pairs ("RTX" renders as "RT X");
+   the 650 instance is visually identical at UI sizes and kerns correctly, so bold text maps
+   there. Digits (KPI figures) are unaffected either way. */
+.font-bold,
+b,
+strong {
+  font-weight: 650;
 }
 
 html,
@@ -58,9 +102,18 @@ body {
   background: var(--bg);
   color: var(--text);
   font-size: 14px;
-  line-height: 1.5;
-  font-family: ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+  line-height: 1.55;
+  font-family: var(--font-sans);
+  font-feature-settings: 'ss01', 'tnum';
   -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+/* Headings carry hierarchy through weight and measure, not raw scale. */
+h1,
+h2,
+h3 {
+  letter-spacing: -0.014em;
 }
 
 /* Keyboard focus ring, on every control. */
@@ -81,10 +134,26 @@ body {
   }
 }
 
+/* The StatusPill dot, breathing while a state is in transit. */
+@keyframes gs-pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.35;
+  }
+}
+
+/* The ONE scroller is .gs-main. Without this, any overflow-x wrapper taller than the viewport
+   (a long table) re-opens a page-level scrollbar and the whole shell drags with trailing void. */
+html, body, #root { height: 100%; }
+html, body { overflow: hidden; }   /* the html box is the real page scroller — lock BOTH */
+
 /* Console shell. Below `md` the sidebar leaves the grid and becomes an overlay drawer. */
 .gs-shell {
   grid-template-columns: auto 1fr;
-  grid-template-rows: 56px 1fr;
+  grid-template-rows: 60px 1fr;
   grid-template-areas:
     'brand top'
     'main main';
@@ -97,7 +166,7 @@ body {
 
 @media (min-width: 768px) {
   .gs-shell {
-    grid-template-columns: 240px 1fr;
+    grid-template-columns: 232px 1fr;
     grid-template-areas:
       'brand top'
       'nav main';
@@ -114,27 +183,110 @@ body {
     @apply gs-sr-only;
   }
   .gs-skip-link:focus {
-    @apply not-sr-only fixed top-2 left-2 z-50 w-auto h-auto m-0 p-3 rounded-[9px] bg-primary text-white font-bold shadow-card;
+    @apply not-sr-only fixed top-2 left-2 z-50 w-auto h-auto m-0 p-3 rounded-ctl bg-primary text-on-primary font-bold shadow-card;
     clip: auto;
   }
+
+  /* Surfaces. A card is a real container; a panel groups without claiming elevation. */
   .gs-card {
-    @apply bg-surface border border-border rounded-card p-[18px] shadow-card;
+    @apply bg-surface border border-border rounded-card p-5 shadow-card;
   }
+  .gs-panel {
+    @apply bg-surface border border-border rounded-card;
+  }
+  /* Section heading inside a card or panel. */
+
+/* Form section heading: bigger than the field labels it governs, with a hairline that separates
+   the group from the previous one. `-lead` is the form's first section (no divider needed). */
+.gs-form-sec {
+  font-size: var(--text-sm, 13px);
+  font-weight: 650;
+  color: var(--text);
+  margin: 1.25rem 0 0.65rem;
+  padding-top: 1rem;
+  border-top: 1px solid var(--border);
+}
+.gs-form-sec-lead {
+  border-top: none;
+  padding-top: 0;
+  margin-top: 0;
+}
+
+  .gs-h2 {
+    @apply text-md font-bold tracking-[-0.01em];
+  }
+  .gs-sub {
+    @apply text-muted text-xs;
+  }
+  /* Hairline between rows of the same kind. */
+  .gs-hair {
+    @apply border-b border-border last:border-b-0;
+  }
+  /* Numbers that are read and compared, not prose. */
+  .gs-num {
+    font-family: var(--font-mono);
+    font-variant-numeric: tabular-nums;
+    letter-spacing: -0.01em;
+  }
+
   .gs-btn {
-    @apply inline-flex items-center gap-1.5 px-3.5 py-2 rounded-[9px] border border-border bg-surface-2 text-text font-bold text-[13px] cursor-pointer transition whitespace-nowrap shrink-0;
+    @apply inline-flex items-center justify-center gap-1.5 px-3.5 py-2 rounded-ctl border border-border-strong
+           bg-surface text-text font-semibold text-sm cursor-pointer whitespace-nowrap shrink-0
+           transition-[background-color,border-color,color,transform] duration-150;
+  }
+  .gs-btn:hover:not(:disabled) {
+    @apply bg-surface-2;
+  }
+  /* Physical press. Reduced-motion users get the colour change only. */
+  .gs-btn:active:not(:disabled) {
+    transform: translateY(1px);
+  }
+  .gs-btn:disabled {
+    @apply cursor-not-allowed opacity-55;
   }
   .gs-btn-primary {
-    @apply bg-primary border-primary text-white;
+    @apply bg-primary border-primary text-on-primary;
+  }
+  .gs-btn-primary:hover:not(:disabled) {
+    background: color-mix(in srgb, var(--primary) 88%, var(--text));
+    border-color: color-mix(in srgb, var(--primary) 88%, var(--text));
   }
   .gs-btn-sm {
-    @apply px-2.5 py-1 text-[12px] rounded-[7px];
+    @apply px-2.5 py-1 text-xs rounded-ctl;
   }
   .gs-btn-danger {
     @apply border-danger text-danger;
   }
-  .gs-input {
-    @apply px-3 py-2 rounded-[9px] border border-border bg-surface text-text text-[13px] outline-none focus:border-primary;
+  .gs-btn-danger:hover:not(:disabled) {
+    background: var(--danger-soft);
   }
+  /* Quiet action inside a dense row: reads as a link until pointed at. */
+  .gs-btn-ghost {
+    @apply border-transparent bg-transparent text-muted;
+  }
+  .gs-btn-ghost:hover:not(:disabled) {
+    @apply bg-surface-2 text-text;
+  }
+
+  .gs-input {
+    @apply px-3 py-2 rounded-ctl border border-border-strong bg-surface text-text text-sm
+           outline-none transition-colors duration-150;
+  }
+  .gs-input-sm {
+    @apply px-2 py-1 text-xs;
+  }
+  .gs-input::placeholder {
+    color: var(--muted);
+    opacity: 1;
+  }
+  .gs-input:focus {
+    border-color: var(--primary);
+    box-shadow: 0 0 0 3px color-mix(in srgb, var(--primary) 18%, transparent);
+  }
+  .gs-input:disabled {
+    @apply bg-surface-2 cursor-not-allowed opacity-70;
+  }
+
   /* Touch sizing. Width is matched as well as pointer, which emulated browsers report unreliably. */
   @media (pointer: coarse), (max-width: 767px) {
     .gs-btn,
@@ -145,7 +297,7 @@ body {
       min-height: 44px;
     }
     .gs-btn-sm {
-      @apply px-3 py-2 text-[13px];
+      @apply px-3 py-2 text-sm;
       min-height: 44px;
     }
     input[type='checkbox'],
@@ -155,32 +307,87 @@ body {
       height: 24px;
     }
   }
+
+  /* Soft-tinted pill: kept ONLY where a filled status badge is still wanted (toasts, reason
+     badges). Ordinary status rendering is the StatusPill dot; metadata chips are .gs-tag. */
   .gs-pill {
-    @apply inline-flex items-center px-2 py-0.5 rounded-full text-[11.5px] font-bold whitespace-nowrap;
+    @apply inline-flex items-center gap-1 px-2 py-0.5 rounded-tag text-xs font-semibold whitespace-nowrap;
   }
-  /* Dashboard KPI tiles and progress bars */
-  .gs-stat .gs-label { @apply text-muted text-[12px] font-semibold; }
-  .gs-stat .gs-value { @apply text-[26px] font-extrabold tracking-tight mt-1.5 mb-1; }
-  .gs-stat .gs-value small { @apply text-[13px] text-muted font-semibold; }
-  .gs-bar { @apply h-2 rounded-md bg-surface-2 overflow-hidden mt-1.5; }
-  .gs-bar > i { @apply block h-full rounded-md bg-primary; }
-  .gs-bar.gpu > i { @apply bg-primary; }
+
+  /* Sub-head inside a quota card: names a band of related ceilings without becoming a heading. */
+  .gs-quota-band {
+    @apply text-xs font-bold text-text mb-1.5 pb-1 border-b border-border;
+  }
+
+  /* Chart hover readout: every series' value at the cursor's timestamp. Positioned by the plugin;
+     pointer-events off so it never blocks the cursor it follows. */
+  .gs-chart-tip {
+    @apply pointer-events-none absolute z-20 rounded-ctl border border-border bg-surface
+           px-2.5 py-1.5 shadow-raised text-2xs whitespace-nowrap;
+  }
+  .gs-chart-tip-head { @apply text-muted mb-1; }
+  .gs-chart-tip-row { @apply flex items-center gap-1.5 leading-relaxed; }
+  .gs-chart-tip-name { @apply text-muted mr-1; }
+  .gs-chart-tip-swatch { @apply w-2.5 h-[3px] rounded-tag shrink-0; }
+
+  /* Quiet metadata chip: cluster, mode, pool, scope, kind, role. Never a status. */
+  .gs-tag {
+    @apply inline-flex items-center gap-1 px-1.5 py-0.5 rounded-tag bg-surface-2 text-muted
+           text-2xs font-medium whitespace-nowrap;
+  }
+
+  /* The transitional-status dot inside StatusPill. */
+  .gs-dot-pulse {
+    animation: gs-pulse 1.6s ease-in-out infinite;
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .gs-dot-pulse {
+      animation: none;
+    }
+  }
+
+  /* KPI figures. The number is the object; the label is annotation. */
+  .gs-stat .gs-label { @apply text-muted text-xs font-semibold; }
+  .gs-stat .gs-value {
+    @apply text-kpi mt-2 mb-1 leading-none;
+    font-family: var(--font-mono);
+    font-variant-numeric: tabular-nums;
+    letter-spacing: -0.03em;
+  }
+  .gs-stat .gs-value small {
+    @apply text-sm text-muted font-semibold;
+    letter-spacing: 0;
+  }
+
+  /* Meters. A thin rule that fills, not a chunky dashboard trough. */
+  .gs-bar { @apply h-1.5 rounded-full bg-border overflow-hidden mt-2.5; }
+  .gs-bar > i { @apply block h-full rounded-full bg-primary; }
+  .gs-bar.primary > i { @apply bg-primary; }
   .gs-bar.warn > i { background: var(--warn); }
   .gs-bar.free > i { background: var(--free); }
+  .gs-bar.danger > i { background: var(--danger); }
+
   .gs-qrow { @apply flex items-center gap-3 py-2.5 border-b border-border last:border-b-0; }
-  .gs-qrow .gs-qn { @apply w-[120px] text-muted font-semibold text-[12.5px]; }
+  .gs-qrow .gs-qn { @apply w-[104px] shrink-0 text-muted font-semibold text-xs; }
   .gs-qrow .gs-bar { @apply flex-1 mt-0; }
-  .gs-qrow .gs-qv { @apply w-[120px] text-right font-bold text-[12.5px]; }
+  /* The reading is a small table, not a sentence: ragged right edges make six rows unreadable. */
+  .gs-qrow .gs-qv {
+    @apply shrink-0 flex items-baseline justify-end font-semibold text-xs;
+    font-family: var(--font-mono);
+    font-variant-numeric: tabular-nums;
+  }
+  .gs-qv-used { @apply w-[54px] text-right; }
+  .gs-qv-sep { @apply px-1.5 text-muted opacity-50; }
+  .gs-qv-lim { @apply w-[52px] text-left; }
+  .gs-qv-unit { @apply w-[38px] text-left text-muted font-medium; }
 }
 
 /* Phone floor: 12px text, 44px targets. Last in the sheet and specificity-raised to beat the
-   utilities it corrects. */
+   utilities it corrects. On the type scale only text-2xs (and the tag chip built on it) sits
+   under 12px; the legacy arbitrary bracket sizes are fully swept, so no bracket selectors. */
 @media (max-width: 767px) {
-  html .text-\[10px\],
-  html .text-\[10\.5px\],
-  html .text-\[11px\],
-  html .text-\[11\.5px\],
-  html .gs-pill {
+  html .text-2xs,
+  html .gs-tag {
     font-size: 12px;
   }
 

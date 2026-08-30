@@ -1,14 +1,18 @@
 """queue_ticker — re-schedule on capacity return (interval 10s).
 
-On operator-reported resource-return events, ZPOPMAX gshare:queue (highest score = top priority)
-and make a reschedule decision. Decision only; the desired handoff is performed by the scheduler.
+Each tick admits queued sessions head-first until the head no longer fits (strict head-of-line:
+the queue promises order, so a smaller entry behind a blocked head must wait). Ranking comes from
+app.domain.queue_ranking over the PG QueueEntry rows — there is no Redis queue.
 """
 from __future__ import annotations
 
+from sqlalchemy import func, select
+
 from app.core.logging import get_logger
-from app.core.redis import get_redis
+from app.core.metrics import QUEUE_DEPTH
 from app.db.base import get_sessionmaker
-from app.domain.scheduler import QUEUE_KEY, SchedulerService
+from app.db.models import QueueEntry
+from app.domain.scheduler import SchedulerService
 
 log = get_logger(__name__)
 
@@ -19,24 +23,18 @@ MAX_DEQUEUE_PER_TICK = 50
 async def run() -> None:
     """Drain queued sessions onto returned capacity.
 
-    Each tick: while the queue has entries and capacity allows, ZPOPMAX the top-priority session
-    and re-run admission (SchedulerService.reschedule_from_queue). On still-no-capacity the entry
-    is pushed back and we stop (no further progress this tick).
+    reschedule_from_queue reports its outcome: keep going on "admitted" (capacity may fit more)
+    and "skipped" (a stale entry was dropped, the real head is still unexamined); stop on
+    "blocked" (head-of-line holds) or "empty".
     """
-    redis = get_redis()
-    if await redis.zcard(QUEUE_KEY) == 0:
-        return
-
     maker = get_sessionmaker()
+    async with maker() as db:
+        QUEUE_DEPTH.set(int(await db.scalar(select(func.count()).select_from(QueueEntry)) or 0))
+        await db.commit()  # close the autobegun read tx (the session may be shared in tests)
     for _ in range(MAX_DEQUEUE_PER_TICK):
-        before = await redis.zcard(QUEUE_KEY)
-        if before == 0:
-            return
         async with maker() as db:
             scheduler = SchedulerService(db)
-            await scheduler.reschedule_from_queue()
+            outcome = await scheduler.reschedule_from_queue()
             await db.commit()
-        after = await redis.zcard(QUEUE_KEY)
-        # No net progress (the top entry was pushed back) -> capacity exhausted; stop this tick.
-        if after >= before:
+        if outcome in ("blocked", "empty"):
             return

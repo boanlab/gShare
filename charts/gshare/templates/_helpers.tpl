@@ -79,3 +79,16 @@ same handoff when it dequeues, so it mounts exactly what the api does.
             - path: namespace
               fieldRef: { fieldPath: metadata.namespace }
 {{- end -}}
+
+{{/*
+Node pinning for control-plane pods (api, worker, frontend, data tier, backup jobs).
+Set controlPlane.nodeSelector to keep the control plane off session nodes, so GPU and
+CPU workers carry sessions only. The operator has its own operator.nodeSelector — on a
+data-plane-only cluster it is the one control-plane pod and may need different pinning.
+*/}}
+{{- define "gshare.controlPlaneNodeSelector" -}}
+{{- with .Values.controlPlane.nodeSelector }}
+nodeSelector:
+  {{- toYaml . | nindent 2 }}
+{{- end }}
+{{- end -}}

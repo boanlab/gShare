@@ -19,6 +19,7 @@ spec:
         {{- include "gshare.labels" . | nindent 8 }}
         {{- include "gshare.selectorLabels" (dict "component" "gshare-frontend") | nindent 8 }}
     spec:
+      {{- include "gshare.controlPlaneNodeSelector" . | nindent 6 }}
       automountServiceAccountToken: false
       {{- include "gshare.imagePullSecrets" . | nindent 6 }}
       securityContext:

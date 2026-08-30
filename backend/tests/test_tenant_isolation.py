@@ -174,3 +174,80 @@ async def test_billing_report_no_scope_id_super_only(db):
         await _report(db, _org_admin("org_A"), "org", None)
     # super_admin is unrestricted.
     assert await _report(db, _super(), "org", None) is not None
+
+
+# --------------------------------------------------------------------------- node pools
+
+async def test_dedicated_pool_cards_invisible_to_other_org_in_placement(db):
+    """Org B never places on (or even counts) the cards an admin dedicated to org A."""
+    from app.db.models import GpuDevice, GpuNode, NodePool, NodePoolGrant, Project
+    from app.domain.node_pools import resolve_pool_access
+
+    cluster_id = "clu_pool"
+    pool = NodePool(id="npl_A", cluster_id=cluster_id, name="A-only", kind="dedicated")
+    db.add_all([
+        Project(id="grp_A2", org_id="org_A", name="A2"),
+        Project(id="grp_B2", org_id="org_B", name="B2"),
+        pool,
+        NodePoolGrant(id="pgr_A", pool_id=pool.id, scope="org", scope_id="org_A"),
+        GpuNode(id="nod_A", cluster_id=cluster_id, hostname="a", status="ready", pool_id=pool.id),
+        GpuDevice(id="dev_A", node_id="nod_A", cluster_id=cluster_id, model="A100",
+                  gpu_uuid="GPU-A", total_mem_mb=16000, status="ready", mode="fractional"),
+    ])
+    await db.flush()
+    access_b = await resolve_pool_access(db, cluster_id=cluster_id, user_id="u_b", group_id="grp_B2")
+    assert pool.id not in access_b.allowed()
+    assert access_b.allowed() == {None}
+    access_a = await resolve_pool_access(db, cluster_id=cluster_id, user_id="u_a", group_id="grp_A2")
+    assert access_a.tier_of(pool.id) == 0
+
+
+async def test_list_node_pools_hides_other_tenants_grants(db):
+    """A pool granted to both A and B: A's org_admin sees the pool but only A's grants."""
+    from app.api.infra_router import list_node_pools
+    from app.db.models import Cluster, NodePool, NodePoolGrant, Organization, Project
+
+    db.add_all([
+        Cluster(id="clu_share", name="c", api_server="https://x", runtime="k8s", kubeconfig_secret_ref="s"),
+        Organization(id="org_A", name="A"),
+        Organization(id="org_B", name="B"),
+        Project(id="grp_A3", org_id="org_A", name="A3"),
+        Project(id="grp_B3", org_id="org_B", name="B3"),
+        NodePool(id="npl_S", cluster_id="clu_share", name="shared-by-two", kind="dedicated"),
+        NodePoolGrant(id="pgr_oA", pool_id="npl_S", scope="org", scope_id="org_A"),
+        NodePoolGrant(id="pgr_oB", pool_id="npl_S", scope="org", scope_id="org_B"),
+        NodePoolGrant(id="pgr_gA", pool_id="npl_S", scope="group", scope_id="grp_A3"),
+        NodePoolGrant(id="pgr_gB", pool_id="npl_S", scope="group", scope_id="grp_B3"),
+    ])
+    await db.flush()
+    res = await list_node_pools(cluster_id="clu_share", principal=_org_admin("org_A"), db=db)
+    assert res["total"] == 1
+    seen = {(g["scope"], g["scope_id"]) for g in res["data"][0]["grants"]}
+    assert seen == {("org", "org_A"), ("group", "grp_A3")}
+    names = {g["name"] for g in res["data"][0]["grants"]}
+    assert "B" not in names and "B3" not in names
+    # super_admin still sees every grant.
+    res = await list_node_pools(cluster_id="clu_share", principal=_super(), db=db)
+    assert len(res["data"][0]["grants"]) == 4
+
+
+async def test_policy_shared_pool_limit_round_trips(db):
+    """limits.shared_pool survives create, PATCH and GET (the console's fallback switch)."""
+    from app.api.policies_router import PolicyCreate, PolicyUpdate, create_policy, update_policy
+
+    body = PolicyCreate(
+        scope="org", scope_id="org_A", max_concurrent=1, max_queued=1, max_runtime_min=60,
+        idle_timeout_sec=600, limits={"cpu": 4, "shared_pool": False},
+    )
+    created = await create_policy(body, principal=_super(), db=db)
+    assert created["limits"]["shared_pool"] is False
+    got = await get_policy(created["id"], principal=_org_admin("org_A"), db=db)
+    assert got["limits"] == {"cpu": 4, "shared_pool": False}
+    upd = await update_policy(
+        created["id"], PolicyUpdate(limits={"shared_pool": True}), principal=_super(), db=db
+    )
+    assert upd["limits"] == {"cpu": 4, "shared_pool": True}
+    upd = await update_policy(
+        created["id"], PolicyUpdate(limits={"shared_pool": False}), principal=_super(), db=db
+    )
+    assert upd["limits"]["shared_pool"] is False

@@ -6,6 +6,7 @@ import { api } from '@/api/client';
 const raw = api as unknown as {
   GET: (path: string, init?: { params?: { query?: Record<string, unknown>; path?: Record<string, string> } }) => Promise<{ data?: unknown }>;
   POST: (path: string, init?: { body?: unknown; params?: { path?: Record<string, string> } }) => Promise<{ data?: unknown }>;
+  PUT: (path: string, init?: { body?: unknown; params?: { path?: Record<string, string> } }) => Promise<{ data?: unknown }>;
 };
 
 export type NodeStatus = 'ready' | 'busy' | 'cordoned' | 'offline';
@@ -19,10 +20,22 @@ export interface GpuNode {
   status: NodeStatus;
   cpu: number;
   mem_gb: number;
+  disk_gb?: number;
+  role?: string;
   region: string;
   gpu_mode: GpuMode;
+  mode_counts?: Record<string, number>;
   device_count: number;
+  // Host compute promised to sessions holding a live allocation on this node's cards.
+  alloc_cpu?: number;
+  alloc_mem_gb?: number;
+  alloc_disk_gb?: number;
+  // Sessions currently running on this node (CPU-class included).
+  running_sessions?: number;
   heartbeat_at?: string;
+  // Node pool membership; null means the node is unassigned and behaves as shared.
+  pool_id?: string | null;
+  pool_name?: string | null;
 }
 
 export interface GpuDevice {
@@ -30,6 +43,9 @@ export interface GpuDevice {
   node_id: string;
   model: string;
   mode: GpuMode;
+  // Per-card pool target and drain state (ready | draining | applying | error).
+  desired_mode?: GpuMode | null;
+  mode_state?: string;
   status: string;
   gpu_uuid: string;
   total_mem_mb: number;
@@ -71,6 +87,38 @@ export function useNodes(filter: { status?: NodeStatus; region?: string } = {}, 
       return (data as { data?: GpuNode[] } | undefined)?.data ?? [];
     },
     refetchInterval: 20000,
+  });
+}
+
+// PUT /gpu-devices/{id}/mode — set a card's target pool; placement stops immediately and the
+// change applies once the card drains (fractional↔exclusive is metadata-only).
+export function useSetDeviceMode() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: async ({ deviceId, desired_mode }: { deviceId: string; desired_mode: GpuMode | null }) => {
+      const { data } = await raw.PUT('/api/v1/gpu-devices/{device_id}/mode', {
+        params: { path: { device_id: deviceId } },
+        body: { desired_mode },
+      });
+      return data;
+    },
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['gpu-devices'] }),
+  });
+}
+
+// PUT /gpu-pools/{cluster_id} — set the cluster's MIG/hami-core split by target COUNT; the
+// backend drains the emptiest candidates and drives the transitions.
+export function useSetPoolTargets() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: async ({ clusterId, mig_cards }: { clusterId: string; mig_cards: number }) => {
+      const { data } = await raw.PUT('/api/v1/gpu-pools/{cluster_id}', {
+        params: { path: { cluster_id: clusterId } },
+        body: { mig_cards },
+      });
+      return data as { moved: string[]; transitioning: number };
+    },
+    onSuccess: () => { qc.invalidateQueries({ queryKey: ['gpu-devices'] }); qc.invalidateQueries({ queryKey: nodeKeys.all }); },
   });
 }
 

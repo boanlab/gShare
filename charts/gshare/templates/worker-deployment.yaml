@@ -18,7 +18,10 @@ spec:
       labels:
         {{- include "gshare.labels" . | nindent 8 }}
         {{- include "gshare.selectorLabels" (dict "component" "gshare-worker") | nindent 8 }}
+      annotations:
+        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
     spec:
+      {{- include "gshare.controlPlaneNodeSelector" . | nindent 6 }}
       serviceAccountName: {{ .Values.serviceAccounts.controller }}
       {{- include "gshare.imagePullSecrets" . | nindent 6 }}
       securityContext:

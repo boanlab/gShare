@@ -5,7 +5,8 @@ export interface ApiError {
   code: string;
   message: string;
   status?: number;
-  details?: { field: string; reason: string }[];
+  // The backend sends a free-form dict; validation_failed carries {errors: [pydantic errors]}.
+  details?: Record<string, unknown>;
   requestId?: string;
 }
 
@@ -26,7 +27,27 @@ export function toApiError(body: unknown, status?: number): ApiError {
  */
 export function humanizeError(err: ApiError): string {
   const key = `error.${err.code}`;
-  return i18n.exists(key) ? i18n.t(key) : err.message;
+  const base = i18n.exists(key) ? i18n.t(key) : err.message;
+  // Pydantic validation errors carry the offending field — surface the first one so the user
+  // knows WHICH value to fix, not just that something was invalid.
+  // Quota rejections carry which resource and the used/limit — surface them so the user knows it is
+  // their own aggregate cap (e.g. GPU cores) that is full, not the cluster.
+  if (err.code === 'quota_exceeded' && err.details) {
+    const d = err.details as { resource?: string; limit?: number; used?: number; request?: number };
+    if (d.resource != null && d.limit != null) {
+      return i18n.t('error.quota_exceeded_detail', {
+        resource: d.resource, used: d.used ?? 0, limit: d.limit, request: d.request ?? 0, defaultValue: base,
+      });
+    }
+  }
+  if (err.code === 'validation_failed') {
+    const first = (err.details?.errors as { loc?: unknown[]; msg?: string }[] | undefined)?.[0];
+    if (first) {
+      const field = (first.loc ?? []).filter((p) => p !== 'body').join('.');
+      if (field || first.msg) return `${base} (${[field, first.msg].filter(Boolean).join(': ')})`;
+    }
+  }
+  return base;
 }
 
 // react-query types its errors as `Error`, but the client middleware throws the ApiError envelope

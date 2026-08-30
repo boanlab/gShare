@@ -98,6 +98,14 @@ spec:
                   request=limit (evict on exceed).
                 minimum: 0
                 type: integer
+              fullCard:
+                description: |-
+                  FullCard requests the whole physical card THROUGH hami-scheduler
+                  (gpumem-percentage=100 + gpucores=100) instead of the plain device plugin, so exclusive
+                  sessions flow through the same scheduler and UUID pinning as fractional ones and node-level
+                  exclusive pools are unnecessary. Set by the control plane for mode=exclusive when per-card
+                  pools are enabled.
+                type: boolean
               gpuCores:
                 description: GpuCores is the fractional core percentage 0..100 (nvidia.com/gpucores).
                 maximum: 100
@@ -159,6 +167,14 @@ spec:
                   Paused: when true the operator deletes the session Pod to release the GPU but keeps
                   the CR (phase=Paused, not Terminated). Resuming (false) recreates the Pod and re-binds a GPU.
                 type: boolean
+              pinnedGpuUuid:
+                description: |-
+                  PinnedGpuUuid pins the session to the physical card the control plane's ledger reserved,
+                  via HAMi's nvidia.com/use-gpuuuid annotation. This makes the ledger the real placer: the
+                  card a session runs on is exactly the card that was reserved, and per-card pool membership
+                  stays a control-plane concern HAMi never needs to know about. Distinct from
+                  BorrowedGpuUuid (spot borrow: preemptible annotation + lend interlock).
+                type: string
               preemptible:
                 description: 'Preemptible: this session may be admitted onto a yielded
                   (lent) card and reclaimed (SIGTERM'
@@ -181,8 +197,9 @@ spec:
                     session Pod.
                   properties:
                     mode:
-                      description: 'Mode is the access mode: ReadWriteOnce | ReadWriteMany
-                        | ReadOnlyMany.'
+                      description: |-
+                        Mode is the PVC access mode, from the volume's own access class (RWO/RWX/ROX):
+                        ReadWriteOnce | ReadWriteMany | ReadOnlyMany.
                       enum:
                       - ReadWriteOnce
                       - ReadWriteMany
@@ -193,9 +210,21 @@ spec:
                         /workspace.
                       type: string
                     name:
-                      description: Name is the logical volume name (also used as the
-                        PVC/mount identifier).
+                      description: |-
+                        Name is the logical volume name — the control plane's volume id (vol_...). The operator
+                        sanitizes it to an RFC 1123 name for the PVC and the pod volume (lowercase, '_' -> '-').
                       type: string
+                    readOnly:
+                      description: |-
+                        ReadOnly mounts the volume read-only in THIS session, independent of the PVC access mode
+                        (a writable RWX volume can still be attached ro).
+                      type: boolean
+                    sizeGb:
+                      description: |-
+                        SizeGb is the provisioned quota backing the PVC the operator ensures. 0 falls back to a
+                        10Gi default (older control planes that do not send it).
+                      minimum: 0
+                      type: integer
                   required:
                   - mode
                   - mountPath

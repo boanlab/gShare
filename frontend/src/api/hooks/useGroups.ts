@@ -30,6 +30,7 @@ export interface Project {
   status: ProjectStatus;
   created_at: string;
   wallet_id?: string;
+  member_count?: number;
 }
 
 export interface Membership {
@@ -101,7 +102,7 @@ export function useOrganizations(opts?: { enabled?: boolean }) {
 export function useCreateOrganization() {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: async (body: { name: string; status?: OrgStatus }) => {
+    mutationFn: async (body: { name: string; status?: OrgStatus; create_node_pool?: boolean }) => {
       const { data } = await raw.POST('/api/v1/organizations', { body });
       return data as Organization;
     },
@@ -193,7 +194,7 @@ export function useProjects(orgId?: string) {
 export function useCreateProject() {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: async (body: { org_id: string; name: string; status?: ProjectStatus; create_project_wallet?: boolean }) => {
+    mutationFn: async (body: { org_id: string; name: string; status?: ProjectStatus; create_project_wallet?: boolean; create_node_pool?: boolean; default_member_credit?: string }) => {
       const { data } = await raw.POST('/api/v1/projects', { body });
       return data as Project;
     },
@@ -205,7 +206,7 @@ export function useCreateProject() {
 export function useUpdateProject() {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: async ({ id, ...body }: { id: string; name?: string; status?: ProjectStatus }) => {
+    mutationFn: async ({ id, ...body }: { id: string; name?: string; status?: ProjectStatus; default_member_credit?: string }) => {
       const { data } = await raw.PATCH('/api/v1/projects/{group_id}', { params: { path: { group_id: id } }, body });
       return data as Project;
     },

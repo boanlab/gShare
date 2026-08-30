@@ -11,5 +11,15 @@ WORKER_NODES=ubuntu@10.10.0.196:exclusive,ubuntu@10.10.0.197:fractional
 # NVIDIA runtime is not installed on them.
 # CPU_WORKERS=ubuntu@10.10.0.200,ubuntu@10.10.0.201
 
+# Optional STORAGE_NODE: one node holding a ZFS pool exported over NFS for user volumes, as
+# user@ip:/dev/<device>. The device is taken whole (VM: a second virtio disk; hardware: a spare
+# NVMe/SATA disk). It is labelled and tainted `storage` so nothing else schedules there.
+# STORAGE_NODE=ubuntu@10.10.0.194:/dev/vdb
+# Several devices as a mirror or raidz: STORAGE_VDEVS="mirror /dev/sdb /dev/sdc"
+
+# Optional LOCAL_REGISTRY: a plain-HTTP image registry on the LAN that every node's containerd is
+# configured for (certs.d). Leave unset when images come from a public/TLS registry.
+# LOCAL_REGISTRY=10.10.0.191:5001
+
 # Optional SSH_OPTS; defaults to "-o StrictHostKeyChecking=accept-new -o ConnectTimeout=10"
 # SSH_OPTS="-i ~/.ssh/id_ed25519 -o StrictHostKeyChecking=accept-new"

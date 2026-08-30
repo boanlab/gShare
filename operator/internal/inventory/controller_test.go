@@ -93,3 +93,35 @@ func TestCPUNodeNoDevices(t *testing.T) {
 		t.Fatalf("expected nil for CPU node, got %+v", devs)
 	}
 }
+
+// Per-card mode: HAMi's register annotation can mark individual cards "mig" while others stay
+// "hami-core" — the report must carry the distinction per DEVICE, with hami-core mapping to the
+// node-label fallback (fractional vs exclusive is GShare policy, not a HAMi fact).
+func TestDevicesFromHAMiPerCardMode(t *testing.T) {
+	node := &corev1.Node{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:   "gpu-mixed",
+			Labels: map[string]string{labelGPUMode: "fractional"},
+			Annotations: map[string]string{
+				annoHAMiRegister: `[` +
+					`{"id":"GPU-frac","count":10,"devmem":98304,"devcore":100,"type":"NVIDIA RTX PRO 6000 Blackwell","mode":"hami-core","health":true},` +
+					`{"id":"GPU-mig","count":10,"devmem":98304,"devcore":100,"type":"NVIDIA RTX PRO 6000 Blackwell","mode":"mig","health":true}` +
+					`]`,
+			},
+		},
+	}
+	devs := devicesFromHAMi(node)
+	if len(devs) != 2 {
+		t.Fatalf("expected 2 devices, got %d", len(devs))
+	}
+	byUUID := map[string]Device{}
+	for _, d := range devs {
+		byUUID[d.UUID] = d
+	}
+	if got := byUUID["GPU-frac"].Mode; got != "fractional" {
+		t.Fatalf("hami-core card should fall back to the node label: got %q", got)
+	}
+	if got := byUUID["GPU-mig"].Mode; got != "mig" {
+		t.Fatalf("mig card must report mig: got %q", got)
+	}
+}

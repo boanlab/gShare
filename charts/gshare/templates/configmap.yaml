@@ -13,10 +13,23 @@ data:
   # operator's --session-domain. SESSION_DOMAIN is the console domain. The app reads only
   # GSHARE_-prefixed variables (pydantic env_prefix).
   GSHARE_SESSION_DOMAIN: {{ .Values.global.domains.console | quote }}
-  GSHARE_SESSION_URL_SCHEME: "https"
+  # http is for deployments without a TLS-terminating proxy in front (labs, air-gapped sites).
+  GSHARE_SESSION_URL_SCHEME: {{ .Values.global.sessionUrlScheme | default "https" | quote }}
   # Redis connection, derived from values.redis. Shared by api and worker for the queue, locks,
   # connect tokens, and idempotency.
   GSHARE_REDIS_URL: "redis://{{ .Values.redis.host }}:{{ .Values.redis.port }}/0"
+  # Per-process SQLAlchemy pool. Size for request-scoped work only — SSE streams do not hold a
+  # pooled connection. Postgres max_connections must cover (api.replicas + worker.replicas) ×
+  # (poolSize + maxOverflow) with headroom.
+  GSHARE_DB_POOL_SIZE: {{ .Values.api.dbPoolSize | default 20 | quote }}
+  # Audit-log retention in days; 0 keeps everything.
+  GSHARE_AUDIT_RETENTION_DAYS: {{ .Values.api.auditRetentionDays | default 180 | quote }}
+  # Console image builds: registry prefix kaniko pushes to; the final ref is
+  # {prefix}/{user_id}/{name}:{tag}. Point at the local registry in plain-HTTP labs.
+  GSHARE_BUILD_REGISTRY: {{ .Values.api.buildRegistry | default "registry.gshare.internal/gshare-user" | quote }}
+  {{- /* not `default`: 0 is a legitimate value (reclaim on the next sync) and `default` would swallow it */}}
+  GSHARE_VOLUME_RECLAIM_GRACE_HOURS: {{ ternary .Values.api.volumeReclaimGraceHours 24 (hasKey .Values.api "volumeReclaimGraceHours") | quote }}
+  GSHARE_DB_MAX_OVERFLOW: {{ .Values.api.dbMaxOverflow | default 10 | quote }}
   # JWKS used to verify the internal RS256 JWT. The api fetches it from itself when verifying an
   # operator callback. The default (api.gshare.internal) does not resolve inside the cluster, so it
   # must be overridden with the in-cluster service URL.
@@ -31,5 +44,7 @@ data:
   # Fractional borrowing. Toggle it together with operator.hamiYieldExtender; only the HAMi extender
   # path can borrow fractionally.
   GSHARE_YIELD_FRACTIONAL_BORROW: {{ .Values.operator.hamiYieldExtender | quote }}
+  # Per-card GPU pools: must match the operator's --per-card-mode (both read operator.perCardMode).
+  GSHARE_PER_CARD_MODE: {{ .Values.operator.perCardMode | quote }}
 
 {{- end }}

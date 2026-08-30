@@ -1,34 +1,78 @@
+import { Link } from 'react-router-dom';
 import { useClusterMetrics, useDashboardSummary } from '@/api/hooks/useAdminDashboard';
+import { useGpuDevices } from '@/api/hooks/useNodes';
+import { useAuditLogs } from '@/api/hooks/useAudit';
+import { actionLabel, resultMeta, targetDisplay, changesSummary } from '@/features/admin/Audit';
 import { PageHeader } from '@/components/PageHeader';
 import { useTranslation } from 'react-i18next';
 import { useAuthStore } from '@/auth/authStore';
 import { formatVram } from '@/lib/format';
+import { ErrorState } from '@/components/EmptyState';
+import { Figure } from '@/components/Figure';
+import { Meter } from '@/components/Meter';
+import { Timestamp } from '@/components/Timestamp';
+import type { ReactNode } from 'react';
 
-// The admin dashboard, backed by GET /metrics/cluster and /dashboard/summary.
-// Cluster-wide utilisation, VRAM packing, sessions, node health, and credit usage as KPI cards.
+// The admin dashboard, backed by GET /metrics/cluster, /sessions/gpu-availability, and the audit
+// trail. One hero KPI band, a per-card GPU grid (the fleet's actual shape), node/compute pressure,
+// and a recent-activity feed — patterned after infra monitoring consoles rather than a card pile.
 
-function Stat({ label, value, unit, barPct, barKind, legend }: {
-  label: string;
-  value: string | number;
-  unit?: string;
-  barPct?: number;
-  barKind?: 'gpu' | 'warn' | 'plain';
-  legend?: string;
-}) {
-  const barColor = barKind === 'warn' ? 'bg-warn' : barKind === 'plain' ? 'bg-border' : 'bg-gpu';
+/** A labelled figure inside a side panel. */
+function Row({ label, value }: { label: string; value: ReactNode }) {
   return (
-    <div className="gs-card">
-      <div className="text-[12px] text-muted font-semibold">{label}</div>
-      <div className="text-2xl font-extrabold mt-1">
-        {value}
-        {unit && <small className="text-muted text-[13px] font-semibold ml-1">{unit}</small>}
+    <div className="gs-hair flex items-center justify-between gap-4 py-2">
+      <span className="text-muted text-sm">{label}</span>
+      <span className="gs-num font-semibold text-sm">{value}</span>
+    </div>
+  );
+}
+
+/** One capacity row: label, mono reading, and the fill underneath. */
+function CapacityRow({ label, reading, pct, variant = 'primary' }: {
+  label: string;
+  reading: string;
+  pct: number;
+  variant?: 'primary' | 'free' | 'warn' | 'danger';
+}) {
+  return (
+    <div className="py-2">
+      <div className="flex items-baseline justify-between gap-4 mb-1.5">
+        <span className="text-muted text-xs font-semibold">{label}</span>
+        <span className="gs-num text-xs">{reading}</span>
       </div>
-      {barPct != null && (
-        <div className="mt-2 h-1.5 rounded-full bg-surface-2 overflow-hidden">
-          <div className={`h-full ${barColor}`} style={{ width: `${Math.min(100, Math.max(0, barPct))}%` }} />
-        </div>
-      )}
-      {legend && <div className="text-[11.5px] text-muted mt-1.5">{legend}</div>}
+      <Meter value={pct} variant={variant} />
+    </div>
+  );
+}
+
+/** Strip vendor noise so tiles read as "RTX 4090 #1", not a spec sheet. */
+function shortModel(model: string): string {
+  return model.replace(/^NVIDIA\s+(GeForce\s+)?/, '');
+}
+
+/** One GPU card: VRAM fill, free cores, mode — the rack view. */
+function DeviceTile({ model, index, freeMemMb, totalMemMb, freeCores, mode }: {
+  model: string;
+  index: number;
+  freeMemMb: number;
+  totalMemMb: number;
+  freeCores: number;
+  mode: string;
+}) {
+  const { t } = useTranslation();
+  const usedPct = totalMemMb > 0 ? ((totalMemMb - freeMemMb) / totalMemMb) * 100 : 0;
+  const variant = usedPct >= 90 ? 'danger' : usedPct >= 70 ? 'warn' : 'primary';
+  return (
+    <div className="rounded-ctl border border-border bg-surface-2/40 px-3 py-2.5 min-w-0">
+      <div className="flex items-center justify-between gap-2 mb-1.5">
+        <span className="text-xs font-bold truncate">{shortModel(model)} <span className="text-muted gs-num">#{index + 1}</span></span>
+        <span className="gs-tag shrink-0">{t(`enum.deviceMode.${mode}`, { defaultValue: mode })}</span>
+      </div>
+      <Meter value={usedPct} variant={variant} />
+      <div className="flex items-center justify-between gap-2 mt-1.5 text-2xs gs-num text-muted">
+        <span>{formatVram(totalMemMb - freeMemMb)} / {formatVram(totalMemMb)}</span>
+        <span>{t('admin.dashboard.deviceFreeShort')} {freeCores}%</span>
+      </div>
     </div>
   );
 }
@@ -38,32 +82,41 @@ export function AdminDashboard() {
   // /metrics/cluster is super_admin only, so other roles never make the call and see a scoped
   // summary instead.
   const isSuper = useAuthStore((s) => s.claims.global_role === 'super_admin');
-  const { data: m, isLoading, isError, isFetching: metricsFetching, refetch: refetchMetrics, dataUpdatedAt: metricsUpdatedAt } = useClusterMetrics({}, { enabled: isSuper });
-  const { data: summary, isFetching, refetch, dataUpdatedAt } = useDashboardSummary();
+  const { data: m, isLoading, isError, error, refetch: refetchMetrics } = useClusterMetrics({}, { enabled: isSuper });
+  const { data: summary } = useDashboardSummary();
+  // The fleet inventory, NOT /sessions/gpu-availability: that endpoint applies the caller's
+  // node-pool access, which hid pool-granted cards from the admin's own grid.
+  const { data: fleetDevices = [] } = useGpuDevices();
+  const auditQ = useAuditLogs(isSuper ? { size: 8, sort: '-at' } : {});
+  const auditRows = (auditQ.data?.data ?? []) as Array<{
+    id: string; action: string; actor_id?: string; actor_name?: string; result?: string; at?: string;
+    target: string; target_name?: string; detail?: Record<string, unknown>;
+  }>;
+  const auditNames = ((auditQ.data as { names?: Record<string, string> } | undefined)?.names) ?? {};
 
   const vramPct = m && m.gpu.vram_total_mb > 0 ? (m.gpu.vram_used_mb / m.gpu.vram_total_mb) * 100 : 0;
-  const nodeReadyPct = m && m.nodes.total > 0 ? ((m.nodes.ready + m.nodes.busy) / m.nodes.total) * 100 : 0;
   const healthAlerts = m ? m.nodes.cordoned + m.nodes.offline : 0;
 
-  // For an org_admin or group_admin: a summary of their own scope in place of the cluster KPIs.
+  // For an org_admin or group_admin: their own summary (same endpoint as the user dashboard) in
+  // place of the super_admin-only cluster KPIs.
   if (!isSuper) {
-    const ru = summary?.resource_usage;
     return (
       <div>
         <PageHeader
           title={t('admin.dashboard.title')}
           description={t('admin.dashboard.scopedSubtitle')}
-          updatedAt={dataUpdatedAt || null}
-          onRefresh={() => refetch()}
-          isFetching={isFetching}
         />
-        <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
-          <Stat label={`▶ ${t('admin.dashboard.runningSessions')}`} value={ru?.running_sessions ?? 0} />
-          <Stat label={`⟳ ${t('admin.dashboard.queuedSessions')}`} value={ru?.queued_sessions ?? 0} />
-          <Stat label={`◆ ${t('admin.dashboard.vramInUse')}`} value={ru ? formatVram(ru.gpu_mem_mb_in_use) : '-'} />
-          <Stat label={`◴ ${t('admin.dashboard.activeToday')}`} value={ru?.active_minutes_today ?? 0} unit={t('admin.dashboard.minutes')} />
-        </div>
-        <p className="text-muted text-[12px] mt-4">{t('admin.dashboard.superOnly')}</p>
+        <section className="gs-panel grid md:grid-cols-4">
+          <Figure label={t('admin.dashboard.runningSessions')} value={summary?.sessions.running ?? 0} />
+          <Figure label={t('admin.dashboard.activeSessions')} value={summary?.sessions.active ?? 0} />
+          <Figure label={t('admin.dashboard.vramInUse')} value={summary ? formatVram(summary.vram.used_mb) : '-'} />
+          <Figure
+            label={t('admin.dashboard.computeCpu')}
+            value={summary?.compute.cpu.used ?? 0}
+            unit={summary?.compute.cpu.limit ? `/ ${summary.compute.cpu.limit} vCPU` : 'vCPU'}
+          />
+        </section>
+        <p className="text-muted text-xs mt-4">{t('admin.dashboard.superOnly')}</p>
       </div>
     );
   }
@@ -73,56 +126,162 @@ export function AdminDashboard() {
       <PageHeader
         title={t('admin.dashboard.title')}
         description={t('admin.dashboard.globalSubtitle')}
-        updatedAt={metricsUpdatedAt || null}
-        onRefresh={() => { void refetchMetrics(); void refetch(); }}
-        isFetching={metricsFetching}
       />
 
       {isLoading ? (
-        <div className="gs-card"><p className="text-muted">{t('common.loading')}</p></div>
+        <div className="gs-panel p-5"><p className="text-muted">{t('common.loading')}</p></div>
       ) : isError || !m ? (
-        <div className="gs-card"><p className="text-danger">{t('admin.dashboard.loadFailed')}</p></div>
+        <div className="gs-panel"><ErrorState error={error} onRetry={() => refetchMetrics()} /></div>
       ) : (
         <>
-          <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
-            <Stat label={`▦ ${t('admin.dashboard.gpuUtil')}`} value={m.gpu.avg_utilization_pct.toFixed(0)} unit="%" barPct={m.gpu.avg_utilization_pct} barKind="gpu" />
-            <Stat label={`◆ ${t('admin.dashboard.vramPacking')}`} value={vramPct.toFixed(0)} unit="%" barPct={vramPct} barKind="gpu" legend={t('admin.dashboard.binpackEfficiency')} />
-            <Stat label={`▶ ${t('admin.dashboard.activeSessions')}`} value={m.sessions.running} unit={`/ ${m.sessions.running + m.sessions.queued}`} barPct={nodeReadyPct} barKind="warn" legend={t('admin.dashboard.runningOfTotal')} />
-            <Stat label={`⟳ ${t('admin.dashboard.queue')}`} value={m.sessions.queued} unit={t('admin.dashboard.waiting')} barPct={m.sessions.queued > 0 ? 40 : 0} barKind="plain" />
+          {/* The lead band: the six numbers an operator on call reads first. Active sessions alone
+              gets the accent ink. */}
+          <section className="gs-panel grid md:grid-cols-3 xl:grid-cols-6 mb-5">
+            <Figure hero label={t('admin.dashboard.activeSessions')} value={m.sessions.running} foot={t('admin.dashboard.runningOfTotal')} />
+            <Figure label={t('admin.dashboard.queue')} value={m.sessions.queued} unit={t('admin.dashboard.waiting')} />
+            <Figure label={t('admin.dashboard.gpuUtil')} value={m.gpu.avg_utilization_pct.toFixed(0)} unit="%"
+              foot={t('admin.dashboard.gpuUtilBasis')} bar={{ value: m.gpu.avg_utilization_pct }} />
+            <Figure label={t('admin.dashboard.vramPacking')} value={vramPct.toFixed(0)} unit="%" bar={{ value: vramPct }} foot={`${formatVram(m.gpu.vram_used_mb)} / ${formatVram(m.gpu.vram_total_mb)}`} />
+            <Figure label={t('admin.dashboard.emptyGpus')} value={m.gpu.empty_gpu_count} unit={`/ ${m.gpu.device_total}`} foot={t('admin.dashboard.unpackedDevices')} />
+            <Figure label={t('admin.dashboard.creditsLast24h')} value={m.credit.consumed_last_24h} unit="C" foot={t('admin.dashboard.activeHolds', { amount: m.credit.active_holds })} />
+          </section>
+
+          {/* The fleet's actual shape: one tile per physical card — full row. */}
+          <section className="gs-panel p-5 mb-5">
+              <div className="flex items-baseline justify-between gap-2">
+                <h2 className="gs-h2">{t('admin.dashboard.deviceGridTitle')}</h2>
+                <Link to="/admin/gpus" className="text-primary text-xs font-semibold hover:underline">
+                  {t('admin.dashboard.deviceGridLink')}
+                </Link>
+              </div>
+              <p className="gs-sub mt-1">{t('admin.dashboard.deviceGridSub')}</p>
+              {fleetDevices.length === 0 ? (
+                <p className="text-muted text-sm mt-4">{t('admin.dashboard.unpackedDevices')}</p>
+              ) : (
+                <div className="mt-4 grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-4 gap-2.5">
+                  {(() => {
+                    const perModel: Record<string, number> = {};
+                    return fleetDevices.map((d) => {
+                      const model = d.model ?? '-';
+                      const idx = (perModel[model] = (perModel[model] ?? 0) + 1) - 1;
+                      const total = d.total_mem_mb ?? 0;
+                      const used = d.used_mem_mb ?? 0;
+                      return (
+                        <DeviceTile
+                          key={d.gpu_uuid ?? `${model}-${idx}`}
+                          model={model}
+                          index={idx}
+                          freeMemMb={Math.max(0, total - used)}
+                          totalMemMb={total}
+                          freeCores={Math.max(0, 100 - (d.used_cores ?? 0))}
+                          mode={d.mode ?? '-'}
+                        />
+                      );
+                    });
+                  })()}
+                </div>
+              )}
+          </section>
+
+          {/* Fleet pressure: node states | host compute | storage pool. */}
+          <div className="grid md:grid-cols-2 xl:grid-cols-3 gap-5 mb-5">
+              <section className="gs-panel p-5">
+                {/* The counts below already carry the split; a stacked bar on top only made this
+                    card taller than the one beside it. The total moves up next to the title. */}
+                <div className="flex items-baseline justify-between gap-2">
+                  <h2 className="gs-h2">{t('admin.dashboard.nodeStateBar')}</h2>
+                  <span className="text-muted text-xs">{t('admin.dashboard.totalNodes', { count: m.nodes.total })}</span>
+                </div>
+                <div className="mt-2">
+                  <Row label={t('admin.dashboard.stateBusy')} value={m.nodes.busy} />
+                  <Row label={t('admin.dashboard.stateReady')} value={m.nodes.ready} />
+                  <Row label={t('admin.dashboard.stateCordoned')} value={m.nodes.cordoned} />
+                  <Row label={t('admin.dashboard.stateOffline')} value={m.nodes.offline} />
+                  <Row
+                    label={t('admin.dashboard.healthAlerts')}
+                    value={<span className={healthAlerts > 0 ? 'text-danger' : 'text-free'}>{healthAlerts}</span>}
+                  />
+                </div>
+              </section>
+
+              {m.compute && (
+                <section className="gs-panel p-5">
+                  <h2 className="gs-h2">{t('admin.dashboard.capacityTitle')}</h2>
+                  <div className="mt-1">
+                    <CapacityRow
+                      label={t('admin.dashboard.computeCpu')}
+                      reading={`${m.compute.cpu.used} / ${m.compute.cpu.total} vCPU`}
+                      pct={m.compute.cpu.total > 0 ? (m.compute.cpu.used / m.compute.cpu.total) * 100 : 0}
+                      variant="warn"
+                    />
+                    <CapacityRow
+                      label={t('admin.dashboard.computeMem')}
+                      reading={`${m.compute.mem_gb.used} / ${m.compute.mem_gb.total} GiB`}
+                      pct={m.compute.mem_gb.total > 0 ? (m.compute.mem_gb.used / m.compute.mem_gb.total) * 100 : 0}
+                      variant="warn"
+                    />
+                    <CapacityRow
+                      label={t('admin.dashboard.computeDisk')}
+                      reading={`${m.compute.disk_gb.used} / ${m.compute.disk_gb.total} GB`}
+                      pct={m.compute.disk_gb.total > 0 ? (m.compute.disk_gb.used / m.compute.disk_gb.total) * 100 : 0}
+                      variant="warn"
+                    />
+                  </div>
+                </section>
+              )}
+
+              {(m as { storage?: { disk_gb: { used: number; total: number }; node_count: number } }).storage && (() => {
+                const st = (m as unknown as { storage: { disk_gb: { used: number; total: number }; node_count: number } }).storage;
+                return (
+                  <section className="gs-panel p-5">
+                    <h2 className="gs-h2">{t('admin.dashboard.storageTitle')}</h2>
+                    <p className="gs-sub mt-1">{t('admin.dashboard.storageSub', { count: st.node_count })}</p>
+                    <div className="mt-1">
+                      <CapacityRow
+                        label={t('admin.dashboard.storageAllocated')}
+                        reading={`${st.disk_gb.used} / ${st.disk_gb.total} GB`}
+                        pct={st.disk_gb.total > 0 ? (st.disk_gb.used / st.disk_gb.total) * 100 : 0}
+                        variant={st.disk_gb.used > st.disk_gb.total ? 'danger' : 'primary'}
+                      />
+                    </div>
+                  </section>
+                );
+              })()}
           </div>
 
-          <div className="grid grid-cols-2 lg:grid-cols-4 gap-4 mt-4">
-            <Stat label={`◴ ${t('admin.dashboard.nodesUp')}`} value={`${m.nodes.ready + m.nodes.busy}`} unit={`/ ${m.nodes.total}`} legend={`${m.nodes.cordoned} cordon · ${m.nodes.offline} offline`} />
-            <Stat label={`◇ ${t('admin.dashboard.creditsLast24h')}`} value={m.credit.consumed_last_24h} unit="C" legend={t('admin.dashboard.activeHolds', { amount: m.credit.active_holds })} />
-            <Stat label={`◆ ${t('admin.dashboard.emptyGpus')}`} value={m.gpu.empty_gpu_count} unit={`/ ${m.gpu.device_total}`} legend={t('admin.dashboard.unpackedDevices')} />
-            <Stat label={`⚠ ${t('admin.dashboard.healthAlerts')}`} value={healthAlerts} legend={healthAlerts > 0 ? t('admin.dashboard.cordonOffline') : t('admin.dashboard.healthy')} />
-          </div>
-
-          <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 mt-4">
-            <div className="gs-card">
-              <h2 className="font-bold mb-3">{t('admin.dashboard.nodeDistribution')} <span className="text-muted text-[12px] font-normal">{t('admin.dashboard.totalNodes', { count: m.nodes.total })}</span></h2>
-              <dl className="grid grid-cols-2 gap-y-2 text-[13px]">
-                <dt className="text-muted">ready</dt><dd className="font-semibold">{m.nodes.ready}</dd>
-                <dt className="text-muted">busy</dt><dd className="font-semibold">{m.nodes.busy}</dd>
-                <dt className="text-muted">cordoned</dt><dd className="font-semibold">{m.nodes.cordoned}</dd>
-                <dt className="text-muted">offline</dt><dd className="font-semibold">{m.nodes.offline}</dd>
-              </dl>
+          {/* What just happened: the audit trail's newest entries, deep-linking to the full log. */}
+          <section className="gs-panel p-5">
+            <div className="flex items-center justify-between gap-3 mb-1">
+              <h2 className="gs-h2">{t('admin.dashboard.recentActivity')}</h2>
+              <Link to="/admin/audit" className="text-primary text-xs font-semibold hover:underline">
+                {t('admin.dashboard.viewAudit')} →
+              </Link>
             </div>
-            <div className="gs-card">
-              <h2 className="font-bold mb-3">{t('admin.dashboard.vramResources')} <span className="text-muted text-[12px] font-normal">{t('admin.dashboard.dcgmAggregate')}</span></h2>
-              <dl className="grid grid-cols-2 gap-y-2 text-[13px]">
-                <dt className="text-muted">{t('admin.dashboard.deviceCount')}</dt><dd className="font-semibold">{m.gpu.device_total}</dd>
-                <dt className="text-muted">{t('admin.dashboard.totalVram')}</dt><dd className="font-semibold">{formatVram(m.gpu.vram_total_mb)}</dd>
-                <dt className="text-muted">{t('admin.dashboard.usedVram')}</dt><dd className="font-semibold">{formatVram(m.gpu.vram_used_mb)}</dd>
-                <dt className="text-muted">{t('admin.dashboard.avgUtil')}</dt><dd className="font-semibold">{m.gpu.avg_utilization_pct.toFixed(1)}%</dd>
-                {summary?.resource_usage && (
-                  <>
-                    <dt className="text-muted">{t('admin.dashboard.myRunningSessions')}</dt><dd className="font-semibold">{summary.resource_usage.running_sessions}</dd>
-                  </>
-                )}
-              </dl>
-            </div>
-          </div>
+            {auditRows.length === 0 ? (
+              <p className="text-muted text-sm mt-2">-</p>
+            ) : (
+              <ol>
+                {auditRows.map((r) => {
+                  // Who did what to what, with the outcome — the same reading the audit list gives
+                  // before its detail unfolds, so the two screens never disagree.
+                  const meta = resultMeta(r.result);
+                  const changes = changesSummary(r.detail, auditNames);
+                  return (
+                    <li key={r.id} className="gs-hair flex items-center gap-x-3 gap-y-0.5 py-2 text-sm min-w-0 flex-wrap">
+                      <span className="text-muted text-xs shrink-0 w-[7.5rem] truncate">{r.actor_name ?? '-'}</span>
+                      <span className="font-semibold shrink-0">{actionLabel(r.action)}</span>
+                      <span className="text-muted text-xs truncate max-w-[26rem]">{targetDisplay(r)}</span>
+                      <span className={`gs-pill text-2xs shrink-0 ${meta.tone}`}>{meta.label}</span>
+                      {changes && (
+                        <span className="text-muted text-2xs basis-full sm:basis-auto truncate max-w-[34rem]" title={changes}>{changes}</span>
+                      )}
+                      <Timestamp value={r.at} className="gs-num text-xs text-muted ml-auto shrink-0" />
+                    </li>
+                  );
+                })}
+              </ol>
+            )}
+          </section>
         </>
       )}
     </div>

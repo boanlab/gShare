@@ -11,11 +11,18 @@ from datetime import UTC, datetime, timedelta
 from decimal import ROUND_HALF_UP, Decimal
 
 from fastapi import APIRouter, Depends, Query, Request, status
-from sqlalchemy import func, select
+from pydantic import BaseModel, Field
+from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sse_starlette.sse import EventSourceResponse
 
-from app.api.deps import Pagination, get_current_principal, idempotency_key, require_idem
+from app.api.deps import (
+    Pagination,
+    get_current_principal,
+    get_sse_principal,
+    idempotency_key,
+    require_idem,
+)
 from app.api.schemas.session import (
     BulkTerminateRequest,
     ConnectionInfo,
@@ -25,11 +32,18 @@ from app.api.schemas.session import (
     SessionRead,
 )
 from app.auth.rbac import Principal
-from app.core.errors import Forbidden, InvalidStateTransition, NotFound
+from app.core.errors import (
+    Forbidden,
+    InvalidStateTransition,
+    NotFound,
+    NotImplementedFeature,
+)
+from app.core.metrics import SSE_STREAMS
 from app.core.redis import get_redis
-from app.db.base import get_db
+from app.db.base import get_db, get_sessionmaker
 from app.db.models import (
     GpuDevice,
+    GpuNode,
     Membership,
     Offering,
     Organization,
@@ -38,8 +52,9 @@ from app.db.models import (
     SessionCheckpoint,
     User,
 )
+from app.domain.audit_service import AuditService
 from app.domain.connection_token import ConnectionTokenService
-from app.domain.pricing import compute_credit_per_hour, round_credit
+from app.domain.pricing import round_credit
 from app.domain.scheduler import SchedulerService
 from app.domain.session_service import SessionService
 
@@ -75,6 +90,9 @@ def _session_read(
     group_name: str | None = None,
     org_id: str | None = None,
     org_name: str | None = None,
+    gpu_model: str | None = None,
+    node_hostname: str | None = None,
+    node_id: str | None = None,
 ) -> SessionRead:
     """Project a Session row to SessionRead, computing occupancy from the snapshot/device."""
     occ: float | None = None
@@ -84,8 +102,11 @@ def _session_read(
         id=sess.id,
         name=sess.name,
         status=sess.status,
+        status_reason=sess.status_reason,
         occupancy=occ,
         bound_gpu_uuid=sess.bound_gpu_uuid,
+        node_hostname=node_hostname or sess.node_hostname,
+        node_id=node_id,
         cluster_id=sess.cluster_id,
         group_id=sess.group_id,
         group_name=group_name,
@@ -95,6 +116,10 @@ def _session_read(
         mode=sess.mode,
         gpu_mem_mb=sess.gpu_mem_mb,
         gpu_cores=sess.gpu_cores,
+        cpu=sess.cpu,
+        mem_gb=sess.mem_gb,
+        disk_gb=sess.disk_gb,
+        gpu_model=gpu_model,
         owner_user_id=sess.owner_user_id,
         owner_name=owner_name,
         credit_per_hour_snapshot=(
@@ -103,6 +128,7 @@ def _session_read(
         started_at=sess.started_at,
         terminated_at=sess.terminated_at,
         created_at=sess.created_at,
+        status_changed_at=sess.status_changed_at,
     )
 
 
@@ -156,15 +182,8 @@ async def preview_cost(
         raise NotFound("offering not found", {"offering_id": body.offering_id})
 
     if body.resource_class == "cpu":
-        # CPU session: priced proportionally to cpu, mem, and disk from the compute preset or the
-        # offering defaults, at occupancy 1.0, with a one-hour hold.
-        cpu_v = body.cpu if body.cpu is not None else offering.cpu
-        mem_v = body.mem_gb if body.mem_gb is not None else offering.mem_gb
-        disk_v = body.disk_gb if body.disk_gb is not None else offering.disk_gb
-        per_hour = compute_credit_per_hour(cpu_v, mem_v, disk_v)
-        return PreviewCostResponse(
-            estimated_credit_per_hour=float(per_hour), occupancy=1.0, hold_amount=float(per_hour)
-        )
+        # CPU session: free — host cpu/mem/disk are governed by resource-policy quotas, not billed.
+        return PreviewCostResponse(estimated_credit_per_hour=0.0, occupancy=1.0, hold_amount=0.0)
 
     # Device VRAM denominator for occupancy: representative ready device of the offering's model
     # in the requested cluster. Fall back to GPU_REFERENCE_MEM_MB (NOT offering.gpu_mem_mb —
@@ -226,10 +245,17 @@ async def create_session(
     require_idem(idem)
     principal.require(action="session.create", group_id=body.group_id)
     _clamp_priority(principal, body)
-    return await SchedulerService(db).create_session(body, principal, idem)
+    res = await SchedulerService(db).create_session(body, principal, idem)
+    sid = res.get("id") if isinstance(res, dict) else getattr(res, "id", None)
+    await AuditService(db).record(
+        actor=principal.user_id, action="session.create", target=sid, result="accepted",
+        group_id=body.group_id, name=getattr(body, "name", None),
+    )
+    await db.commit()
+    return res
 
 
-@router.get("/sessions", response_model=list[SessionRead])
+@router.get("/sessions")
 async def list_sessions(
     page: Pagination = Depends(),
     status_filter: str | None = Query(default=None, alias="status"),
@@ -271,9 +297,35 @@ async def list_sessions(
     if group_id is not None:
         stmt = stmt.where(Session.group_id == group_id)
 
+    total = int(await db.scalar(select(func.count()).select_from(stmt.subquery())) or 0)
     stmt = stmt.order_by(Session.created_at.desc()).offset(page.offset).limit(page.size)
     rows = (await db.scalars(stmt)).all()
     # Resolve owner names for the administrators' monitoring view.
+    # Offering device-model strings, so the list can show WHICH GPU a session runs on
+    # ("NVIDIA RTX PRO 5000 Blackwell") instead of a card UUID.
+    off_ids = {s.offering_id for s in rows if s.offering_id}
+    off_names = {
+        oid: model for oid, model in
+        (await db.execute(select(Offering.id, Offering.gpu_model).where(Offering.id.in_(off_ids)))).all()
+    } if off_ids else {}
+    # WHERE each session runs: the bound GPU's node wins; a CPU session falls back to the
+    # operator-reported hostname, which is matched back to the inventory for the deep link.
+    uuids = {s.bound_gpu_uuid for s in rows if s.bound_gpu_uuid}
+    node_by_uuid: dict[str, tuple[str, str]] = {}
+    if uuids:
+        drows = (await db.execute(
+            select(GpuDevice.gpu_uuid, GpuNode.id, GpuNode.hostname)
+            .join(GpuNode, GpuNode.id == GpuDevice.node_id)
+            .where(GpuDevice.gpu_uuid.in_(uuids))
+        )).all()
+        node_by_uuid = {u: (nid, host) for u, nid, host in drows}
+    hostnames = {s.node_hostname for s in rows if s.node_hostname and not s.bound_gpu_uuid}
+    node_id_by_host: dict[str, str] = {}
+    if hostnames:
+        nrows2 = (await db.execute(
+            select(GpuNode.hostname, GpuNode.id).where(GpuNode.hostname.in_(hostnames))
+        )).all()
+        node_id_by_host = {h: nid for h, nid in nrows2}
     oids = {s.owner_user_id for s in rows if s.owner_user_id}
     onames = {u: n for u, n in (await db.execute(select(User.id, User.name).where(User.id.in_(oids)))).all()} if oids else {}
     # Map groups to their names and organizations, and organizations to their names, since
@@ -309,18 +361,27 @@ async def list_sessions(
         # Prefer the session's group, falling back to the owner's membership group.
         gid = s.group_id or owner_group.get(s.owner_user_id)
         gname, org_id = gmap.get(gid, (None, None)) if gid else (None, None)
+        nid, host = node_by_uuid.get(s.bound_gpu_uuid or "", (None, None))
+        if host is None and s.node_hostname:
+            host = s.node_hostname
+            nid = node_id_by_host.get(host)
         return _session_read(
             s, owner_name=onames.get(s.owner_user_id),
             group_name=gname, org_id=org_id, org_name=org_names.get(org_id) if org_id else None,
+            gpu_model=off_names.get(s.offering_id),
+            node_hostname=host, node_id=nid,
         )
 
-    return [_read(s) for s in rows]
+    return {
+        "data": [_read(s) for s in rows],
+        "pagination": {"page": page.page, "size": page.size, "total": total},
+    }
 
 
 @router.get("/sessions/events")
 async def sessions_monitor_events(
     request: Request,
-    principal: Principal = Depends(get_current_principal),
+    principal: Principal = Depends(get_sse_principal),
 ):
     """Admin session/queue monitor SSE stream.
 
@@ -335,6 +396,7 @@ async def sessions_monitor_events(
 
 @router.get("/sessions/gpu-availability")
 async def gpu_availability(
+    fleet: bool = Query(default=False),
     principal: Principal = Depends(get_current_principal),
     db: AsyncSession = Depends(get_db),
 ):
@@ -347,9 +409,40 @@ async def gpu_availability(
     This is a literal path, so it must be declared before ``/sessions/{session_id}`` — the same
     reason the events route is."""
     principal.require(action="session.read")
+    # Direct (non-FastAPI) callers hand us the Query default object — coerce to a real bool.
+    fleet = fleet is True
+    # A card on a cordoned or offline node is NOT available: admission filters on the node's state
+    # too (scheduler.reserve_slice), so listing it here would offer capacity the scheduler refuses.
     devs = (
-        await db.scalars(select(GpuDevice).where(GpuDevice.status == "ready"))
+        await db.scalars(
+            select(GpuDevice)
+            .join(GpuNode, GpuNode.id == GpuDevice.node_id, isouter=True)
+            .where(
+                GpuDevice.status == "ready",
+                or_(GpuNode.id.is_(None), GpuNode.status == "ready"),
+            )
+        )
     ).all()
+    # Node pools: the wizard must see exactly what admission would accept — a dedicated card the
+    # caller cannot place on is not "available" (the dashboard applies the same filter).
+    from app.db.models import Membership
+    from app.domain.node_pools import accessible_devices
+
+    group_ids = list(
+        (
+            await db.execute(
+                select(Membership.group_id).where(
+                    Membership.user_id == principal.user_id, Membership.group_id.is_not(None)
+                )
+            )
+        ).scalars()
+    ) or [None]
+    if fleet:
+        # Fleet view for admin screens ("does this model exist in the cluster?") — pool grants
+        # are placement policy, not existence, so they must not hide dedicated cards here.
+        principal.require(action="node.read")
+    else:
+        devs = await accessible_devices(db, principal.user_id, group_ids, devs)
     by_model: dict[str, dict] = {}
     for d in devs:
         m = by_model.setdefault(
@@ -375,7 +468,53 @@ async def get_session(
     """Fetch a single session (owner·admin)."""
     sess = await _load_session(db, session_id)
     _require_access(principal, sess)
-    return _session_read(sess)
+    gpu_model = await db.scalar(select(Offering.gpu_model).where(Offering.id == sess.offering_id))
+    node_id, node_host = None, None
+    if sess.bound_gpu_uuid:
+        nrow = (await db.execute(
+            select(GpuNode.id, GpuNode.hostname)
+            .join(GpuDevice, GpuDevice.node_id == GpuNode.id)
+            .where(GpuDevice.gpu_uuid == sess.bound_gpu_uuid)
+        )).first()
+        if nrow:
+            node_id, node_host = nrow
+    if node_host is None and sess.node_hostname:
+        node_host = sess.node_hostname
+        node_id = await db.scalar(select(GpuNode.id).where(GpuNode.hostname == node_host))
+    read = _session_read(sess, gpu_model=gpu_model, node_hostname=node_host, node_id=node_id)
+    # Mounted volumes, joined with their names — the detail screens list what the session sees.
+    from app.api.schemas.session import SessionMountRead
+    from app.db.models import StorageVolume, VolumeMount
+
+    mount_rows = (
+        await db.execute(
+            select(VolumeMount, StorageVolume)
+            .join(StorageVolume, StorageVolume.id == VolumeMount.volume_id, isouter=True)
+            .where(VolumeMount.session_id == sess.id)
+        )
+    ).all()
+    read.mounts = [
+        SessionMountRead(
+            volume_id=m.volume_id,
+            name=(v.name if v is not None else None),
+            type=(v.type if v is not None else None),
+            quota_gb=(v.quota_gb if v is not None else None),
+            mount_path=m.mount_path,
+            mode=m.mode,
+        )
+        for m, v in mount_rows
+    ]
+    # Scratch-disk gauge: the kubelet reading the operator stashed on its last volume-sync tick
+    # (up to ~5 minutes stale). Best-effort — a Redis hiccup must not fail the detail view.
+    try:
+        raw = await get_redis().get(f"sess:diskuse:{sess.id}")
+        if raw:
+            used_s, _, limit_s = raw.partition(":")
+            read.disk_used_bytes = int(used_s)
+            read.disk_limit_bytes = int(limit_s)
+    except Exception:  # noqa: BLE001
+        pass
+    return read
 
 
 @router.post("/sessions/{session_id}/start", response_model=SessionRead)
@@ -389,6 +528,11 @@ async def start_session(
     _require_access(principal, sess)
     await SessionService(db).start(session_id)
     sess = await _load_session(db, session_id)
+    await AuditService(db).record(
+        actor=principal.user_id, action="session.start", target=session_id, result="ok",
+        group_id=sess.group_id,
+    )
+    await db.commit()
     return _session_read(sess)
 
 
@@ -401,8 +545,14 @@ async def stop_session(
     """Stop (pause billing) + finalize remaining consume."""
     sess = await _load_session(db, session_id)
     _require_access(principal, sess)
-    await SessionService(db).stop(session_id)
+    reason = "user_stopped" if sess.owner_user_id == principal.user_id else "admin_stopped"
+    await SessionService(db).stop(session_id, reason=reason)
     sess = await _load_session(db, session_id)
+    await AuditService(db).record(
+        actor=principal.user_id, action="session.stop", target=session_id, result="ok",
+        group_id=sess.group_id, reason=reason,
+    )
+    await db.commit()
     return _session_read(sess)
 
 
@@ -417,6 +567,11 @@ async def restart_session(
     _require_access(principal, sess)
     await SessionService(db).restart(session_id)
     sess = await _load_session(db, session_id)
+    await AuditService(db).record(
+        actor=principal.user_id, action="session.restart", target=session_id, result="ok",
+        group_id=sess.group_id,
+    )
+    await db.commit()
     return _session_read(sess)
 
 
@@ -429,20 +584,41 @@ async def terminate_session(
     """Terminate + settle."""
     sess = await _load_session(db, session_id)
     _require_access(principal, sess)
-    await SessionService(db).terminate(session_id)
+    reason = "user_stopped" if sess.owner_user_id == principal.user_id else "admin_stopped"
+    await SessionService(db).terminate(session_id, reason=reason)
+    await AuditService(db).record(
+        actor=principal.user_id, action="session.terminate", target=session_id, result="ok",
+        group_id=sess.group_id, reason=reason,
+    )
+    await db.commit()
     return {"session_id": session_id, "status": "terminating"}
+
+
+class ForceTerminateBody(BaseModel):
+    """Admin's justification — recorded verbatim in the audit log (the console requires it)."""
+
+    reason: str | None = Field(default=None, max_length=500)
 
 
 @router.post("/sessions/{session_id}/force-terminate", status_code=status.HTTP_202_ACCEPTED)
 async def force_terminate(
     session_id: str,
+    body: ForceTerminateBody | None = None,
     principal: Principal = Depends(get_current_principal),
     db: AsyncSession = Depends(get_db),
 ):
-    """Admin force-terminate without owner consent."""
+    """Admin force-terminate without owner consent. The free-text reason lands in the audit log;
+    the session's status_reason stays the typed `admin_stopped` the console maps to a message."""
     sess = await _load_session(db, session_id)
     principal.require(action="session.force_terminate", group_id=sess.group_id)
-    await SessionService(db).terminate(session_id, forced=True)
+    await SessionService(db).terminate(session_id, forced=True, reason="admin_stopped")
+    # terminate() has committed and reloaded the row, which leaves the session with an autobegun
+    # transaction; wrapping the audit write in db.begin() here raised "A transaction is already
+    # begun" and turned an already-terminated session into a 500. record() commits on its own.
+    await AuditService(db).record(
+        actor=principal.user_id, action="session.force_terminate", target=session_id,
+        reason=(body.reason if body else None), owner_user_id=sess.owner_user_id,
+    )
     return {"session_id": session_id, "status": "terminating"}
 
 
@@ -493,35 +669,22 @@ async def session_logs(
     principal: Principal = Depends(get_current_principal),
     db: AsyncSession = Depends(get_db),
 ):
-    """Recent container/lifecycle log lines.
-
-    Log content originates in the workload Pod (operator/k8s layer). This plane reads the lines the
-    operator has streamed into Redis (``logs:{ses}`` list, newest appended); returns the tail.
-    """
+    """NOT IMPLEMENTED: nothing streams pod logs into this plane (the operator has no Redis
+    producer), so this always returned an empty list dressed up as a log. Honest 501 until a log
+    pipeline exists — use `kubectl logs` on the session pod meanwhile."""
     sess = await _load_session(db, session_id)
     _require_access(principal, sess)
-
-    r = get_redis()
-    raw = await r.lrange(f"logs:{session_id}", -tail, -1)
-    lines: list[dict] = []
-    for item in raw:
-        try:
-            rec = json.loads(item)
-        except (ValueError, TypeError):
-            rec = {"ts": None, "stream": "stdout", "message": str(item)}
-        if stream != "all" and rec.get("stream") not in (stream, None):
-            continue
-        lines.append(rec)
-    return {"session_id": session_id, "lines": lines}
+    raise NotImplementedFeature("session logs are not implemented yet")
 
 
 @router.get("/sessions/{session_id}/connections", response_model=list[ConnectionInfo])
 async def session_connections(
     session_id: str,
+    kind: str | None = Query(default=None, pattern="^(vscode|jupyter|terminal)$"),
     principal: Principal = Depends(get_current_principal),
     db: AsyncSession = Depends(get_db),
 ):
-    """Issue one-time cnx_ connection tokens."""
+    """Issue one-time cnx_ connection tokens; `kind` narrows to one app (one token minted)."""
     sess = await _load_session(db, session_id)
     _require_access(principal, sess)
     if sess.status != "running":
@@ -547,6 +710,8 @@ async def session_connections(
         "jupyter": f"{host_base}/lab",
         "terminal": f"{host_base}/terminal",   # web terminal (ttyd)
     }
+    if kind:
+        kinds = {kind: kinds[kind]}
     expires_at = datetime.now(UTC) + timedelta(
         seconds=_settings.CONNECTION_TOKEN_TTL_SEC
     )
@@ -563,6 +728,62 @@ async def session_connections(
         )
     return out
 
+@router.get("/sessions/{session_id}/usage")
+async def session_usage_self(
+    session_id: str,
+    principal: Principal = Depends(get_current_principal),
+    db: AsyncSession = Depends(get_db),
+):
+    """Measured live usage of the session's pod (owner·admin) — the detail page's meters."""
+    sess = await _load_session(db, session_id)
+    _require_access(principal, sess)
+    from app.api.monitoring_router import session_usage_payload  # lazy: avoid an import cycle
+
+    return await session_usage_payload(session_id)
+
+
+@router.get("/sessions/{session_id}/usage/timeseries")
+async def session_usage_series_self(
+    session_id: str,
+    range_: str = Query(default="15m", alias="range"),
+    principal: Principal = Depends(get_current_principal),
+    db: AsyncSession = Depends(get_db),
+):
+    """The usage metrics over a range (owner·admin) — the detail page's sparklines."""
+    sess = await _load_session(db, session_id)
+    _require_access(principal, sess)
+    from app.api.monitoring_router import session_usage_series  # lazy: avoid an import cycle
+
+    return await session_usage_series(session_id, range_)
+
+
+@router.get("/sessions/{session_id}/timeline")
+async def session_timeline(
+    session_id: str,
+    principal: Principal = Depends(get_current_principal),
+    db: AsyncSession = Depends(get_db),
+):
+    """Lifecycle timeline for the detail screen: created → queued/preparing → running → … with
+    reasons, so an error state is readable from the log instead of a separate message box."""
+    sess = await _load_session(db, session_id)
+    _require_access(principal, sess)
+    from app.db.models import SessionEvent
+
+    rows = (
+        await db.scalars(
+            select(SessionEvent)
+            .where(SessionEvent.session_id == session_id)
+            .order_by(SessionEvent.created_at.asc(), SessionEvent.id.asc())
+            .limit(200)
+        )
+    ).all()
+    return {"data": [
+        {"id": e.id, "kind": e.kind, "reason": e.reason, "message": e.message,
+         "at": e.created_at.isoformat() if e.created_at else None}
+        for e in rows
+    ]}
+
+
 
 @router.post("/sessions/{session_id}/checkpoints", status_code=status.HTTP_202_ACCEPTED)
 async def create_checkpoint(
@@ -570,33 +791,11 @@ async def create_checkpoint(
     principal: Principal = Depends(get_current_principal),
     db: AsyncSession = Depends(get_db),
 ):
-    """Create a point-in-time checkpoint (async)."""
-    from app.core import ids
-
+    """NOT IMPLEMENTED: no worker or operator path takes a checkpoint yet — a row here would be
+    an empty promise (storage_ref stays NULL forever). Honest 501 until the pipeline exists."""
     sess = await _load_session(db, session_id)
     _require_access(principal, sess)
-    if sess.status != "running":
-        raise InvalidStateTransition(
-            "session is not running", {"status": sess.status}
-        )
-    ckp = SessionCheckpoint(
-        id=ids.new("checkpoint"),
-        session_id=session_id,
-        type="criu",
-        storage_ref=None,
-        size_bytes=None,
-    )
-    db.add(ckp)
-    await db.commit()
-    await db.refresh(ckp)
-    return {
-        "id": ckp.id,
-        "session_id": session_id,
-        "type": ckp.type,
-        "status": "creating",
-        "storage_ref": ckp.storage_ref,
-        "size_bytes": ckp.size_bytes,
-    }
+    raise NotImplementedFeature("session checkpoints are not implemented yet")
 
 
 @router.get("/sessions/{session_id}/checkpoints")
@@ -649,19 +848,11 @@ async def restore_checkpoint(
     principal: Principal = Depends(get_current_principal),
     db: AsyncSession = Depends(get_db),
 ):
-    """Restore a session from a checkpoint (async)."""
+    """NOT IMPLEMENTED: restore has no execution path (the operator's checkpointer states restore
+    is intentionally unimplemented) — returning "restoring" here was a fabrication. Honest 501."""
     sess = await _load_session(db, session_id)
     _require_access(principal, sess)
-    ckp = await db.get(SessionCheckpoint, checkpoint_id)
-    if ckp is None or ckp.session_id != session_id:
-        raise NotFound("checkpoint not found", {"checkpoint_id": checkpoint_id})
-    return {
-        "session_id": session_id,
-        "checkpoint_id": checkpoint_id,
-        "status": "restoring",
-        "target": "same_session",
-        "started_at": datetime.now(UTC).isoformat(),
-    }
+    raise NotImplementedFeature("checkpoint restore is not implemented yet")
 
 
 async def _sse_events(channels: list[str] | None, patterns: list[str] | None,
@@ -675,6 +866,7 @@ async def _sse_events(channels: list[str] | None, patterns: list[str] | None,
     r = get_redis()
     pubsub = r.pubsub()
     seq = 0
+    SSE_STREAMS.inc()
     try:
         if channels:
             await pubsub.subscribe(*channels)
@@ -718,6 +910,7 @@ async def _sse_events(channels: list[str] | None, patterns: list[str] | None,
             if channels:
                 await pubsub.unsubscribe()
         finally:
+            SSE_STREAMS.dec()
             closer = getattr(pubsub, "aclose", None) or pubsub.close
             await closer()
 
@@ -726,17 +919,20 @@ async def _sse_events(channels: list[str] | None, patterns: list[str] | None,
 async def session_events(
     session_id: str,
     request: Request,
-    principal: Principal = Depends(get_current_principal),
-    db: AsyncSession = Depends(get_db),
+    principal: Principal = Depends(get_sse_principal),
 ):
     """Per-session SSE event stream.
 
     Subscribes to the session's status-change channel (Redis pub/sub fed by status_sync) and pushes
     status_changed / phase / allocation / heartbeat events. 404/403 are raised before the stream is
     established; the stream terminates cleanly on client disconnect.
+
+    The access check opens its own short-lived DB session: a Depends(get_db) session would stay
+    checked out of the pool for the whole stream (see get_sse_principal).
     """
-    sess = await _load_session(db, session_id)
-    _require_access(principal, sess)
+    async with get_sessionmaker()() as db:
+        sess = await _load_session(db, session_id)
+        _require_access(principal, sess)
     channel = _SESSION_CHANNEL.format(session_id=session_id)
     return EventSourceResponse(_sse_events([channel], None, request))
 

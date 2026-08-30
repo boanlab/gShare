@@ -18,15 +18,19 @@ from typing import Any, Protocol
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.config import settings
 from app.core.errors import NotFound
-from app.db.models import Cluster, Project, ResourcePolicy
+from app.db.models import Cluster
+from app.domain.policy import resolve_effective_policy
 
 GROUP = "gshare.io"
 VERSION = "v1"  # matches the operator CRD: gshare.io/v1, a camelCase structural schema
 PLURAL = "gsharesessions"
 
 # Operator-managed namespace that owns reconciled workloads.
-SESSION_NAMESPACE = "gshare-sessions"
+# Sourced from settings so GSHARE_SESSIONS_NAMESPACE actually takes effect (it was previously a
+# dead setting shadowed by this hard-coded constant).
+SESSION_NAMESPACE = settings.SESSIONS_NAMESPACE
 # W3C traceparent is carried over the async CR boundary as an annotation.
 TRACEPARENT_ANNOTATION = f"{GROUP}/traceparent"
 HAMI_SCHEDULER = "hami-scheduler"
@@ -36,6 +40,13 @@ HAMI_SCHEDULER = "hami-scheduler"
 # schema (gshare.io/v1). The CRD rejects unknown fields, so only permitted keys are emitted, and
 # anything the operator computes itself is left out: session_id becomes metadata.name, and
 # node_selector, scheduler_name, and the gpu object are the operator's to derive.
+# StorageVolume.access_mode -> Kubernetes PVC access mode (the operator provisions the PVC).
+_K8S_ACCESS_MODE = {
+    "RWO": "ReadWriteOnce",
+    "RWX": "ReadWriteMany",
+    "ROX": "ReadOnlyMany",
+}
+
 _CRD_KEY_MAP = {
     "cluster_id": "clusterId",
     "resource_class": "resourceClass",
@@ -57,6 +68,8 @@ _CRD_KEY_MAP = {
     "preemptible": "preemptible",
     "borrowed_gpu_uuid": "borrowedGpuUuid",
     "borrowed_node": "borrowedNode",
+    "pinned_gpu_uuid": "pinnedGpuUuid",
+    "full_card": "fullCard",
 }
 
 
@@ -87,14 +100,23 @@ def _to_crd_spec(spec: dict[str, Any]) -> dict[str, Any]:
         out["connect"] = connect
     vols = []
     for v in spec.get("volumes") or []:
-        # Translate the mount mode (rw or ro) into the CRD's Kubernetes access-mode enum. The
-        # operator treats only ReadOnlyMany as read-only, so ro maps to ReadOnlyMany and rw to
-        # ReadWriteMany.
-        vols.append({
+        # spec.mode carries the PVC ACCESS MODE from the volume's own class (RWO/RWX/ROX,
+        # enriched by apply() from the StorageVolume row); readOnly is the per-session mount
+        # intent. Falling back without enrichment (offline serialization/tests): ro->ROX,
+        # rw->RWO, which matches a personal volume on a default RWO StorageClass.
+        access = _K8S_ACCESS_MODE.get(v.get("access_mode") or "")
+        if access is None:
+            access = "ReadOnlyMany" if v.get("mode") == "ro" else "ReadWriteOnce"
+        entry = {
             "name": v.get("volume_id"),
             "mountPath": v.get("mount_path"),
-            "mode": "ReadOnlyMany" if v.get("mode") == "ro" else "ReadWriteMany",
-        })
+            "mode": access,
+        }
+        if v.get("mode") == "ro":
+            entry["readOnly"] = True
+        if v.get("size_gb"):
+            entry["sizeGb"] = int(v["size_gb"])
+        vols.append(entry)
     if vols:
         out["volumes"] = vols
     return out
@@ -171,6 +193,8 @@ class GShareSessionCRD:
         - mig: gpu.resource=nvidia.com/mig-*; no hami-scheduler.
         - cpu: no GPU; node_selector gshare.io/node-type=cpu.
         """
+        from app.core.config import settings  # lazy: keep module import-light/sandbox-safe
+
         resource_class = getattr(req, "resource_class", None) or sess.resource_class
         # CPU sessions carry no GPU mode; GPU sessions prefer the persisted session
         # mode, falling back to the request.
@@ -208,6 +232,14 @@ class GShareSessionCRD:
             spec["pause_mode"] = "yield"
         if getattr(sess, "preemptible", False):
             spec["preemptible"] = True
+        # Per-card pools: pin the pod to the exact card the ledger reserved (Allocation.gpu_uuid),
+        # so hami-scheduler binds precisely that card and reservation and physical binding cannot
+        # diverge. Emitted only when the feature flag is on and a reservation exists (a queued
+        # session has none yet; requeue re-applies with the fresh reservation).
+        if settings.PER_CARD_MODE and resource_class != "cpu":
+            pinned = getattr(sess, "_pinned_gpu_uuid", None)
+            if pinned:
+                spec["pinned_gpu_uuid"] = pinned
 
         if resource_class == "cpu":
             # CPU sessions request no GPU and pin to the cpu node pool.
@@ -223,9 +255,16 @@ class GShareSessionCRD:
             spec["gpu_cores"] = sess.gpu_cores if sess.gpu_cores is not None else req.gpu_cores
             spec["gpu"] = {"resource": "nvidia.com/gpu", "count": 1}
         elif mode == "exclusive":
-            # Standard NVIDIA device-plugin, bypasses HAMi: nvidia.com/gpu:1 only, NO
-            # scheduler_name, NO gpu_mem_mb/gpu_cores.
-            spec["gpu"] = {"resource": "nvidia.com/gpu", "count": 1}
+            if settings.PER_CARD_MODE:
+                # Exclusive THROUGH hami-scheduler as a 100% slice (full_card), sharing the
+                # scheduler and UUID pin with fractional sessions — no node-level pools.
+                spec["scheduler_name"] = HAMI_SCHEDULER
+                spec["full_card"] = True
+                spec["gpu"] = {"resource": "nvidia.com/gpu", "count": 1}
+            else:
+                # Standard NVIDIA device-plugin, bypasses HAMi: nvidia.com/gpu:1 only, NO
+                # scheduler_name, NO gpu_mem_mb/gpu_cores.
+                spec["gpu"] = {"resource": "nvidia.com/gpu", "count": 1}
         elif mode == "mig":
             # MIG profile via nvidia.com/mig-*; no hami-scheduler.
             profile = self._mig_profile(sess, req)
@@ -242,8 +281,11 @@ class GShareSessionCRD:
         # Stamp the idle reaper policy onto the custom resource, where the operator's IdleReaper
         # reads it. The resolved policy value (spec.idle_timeout_sec) wins, falling back to the
         # global default.
-        idle_sec = spec.get("idle_timeout_sec") or settings.IDLE_TIMEOUT_SEC
-        if idle_sec and int(idle_sec) > 0:
+        idle_sec = spec.get("idle_timeout_sec")
+        if idle_sec is None:
+            idle_sec = settings.IDLE_TIMEOUT_SEC
+        if idle_sec is not None and int(idle_sec) >= 0:
+            # "0" is stamped deliberately: the reaper reads it as idle-reaping-disabled.
             annotations[f"{GROUP}/idle-timeout-sec"] = str(int(idle_sec))
         # Stamp the absolute lifetime cap (max runtime), which the operator reaper reads for
         # maxRuntimeExceeded. Only a resolved policy value is stamped (spec.max_runtime_sec,
@@ -268,86 +310,38 @@ class GShareSessionCRD:
 
     # ── apply / get / patch-status / delete ──
     async def _resolve_idle_timeout_sec(self, spec: dict[str, Any]) -> int | None:
-        """Resolve the idle timeout through the policy hierarchy: user, group, organization, global.
+        """Resolve the idle timeout via the shared per-field policy merge (app.domain.policy).
 
-        Takes the most specific policy with idle_timeout_sec > 0. None means build_object falls back
-        to the global default, settings.IDLE_TIMEOUT_SEC.
+        None means build_object falls back to the global default, settings.IDLE_TIMEOUT_SEC.
         """
         if self.db is None:
             return None
-
-        async def _scoped(scope: str, scope_id: str) -> int | None:
-            pol = (
-                await self.db.scalars(
-                    select(ResourcePolicy).where(
-                        ResourcePolicy.scope == scope, ResourcePolicy.scope_id == scope_id
-                    )
-                )
-            ).first()
-            val = getattr(pol, "idle_timeout", None) if pol is not None else None
-            return int(val) if val and int(val) > 0 else None
-
-        owner = spec.get("owner")
-        group_id = spec.get("group_id")
-        if owner:
-            v = await _scoped("user", owner)
-            if v is not None:
-                return v
-        if group_id:
-            v = await _scoped("group", group_id)
-            if v is not None:
-                return v
-            project = await self.db.get(Project, group_id)
-            if project is not None and project.org_id:
-                v = await _scoped("org", project.org_id)
-                if v is not None:
-                    return v
-        return await _scoped("global", "*")
+        pol = await resolve_effective_policy(self.db, spec.get("owner"), spec.get("group_id"))
+        val = pol.idle_timeout if pol is not None else None
+        if val is None:
+            return None
+        # 0 is EXPLICIT unlimited (stamped as "0"; the reaper disables idle reaping), unlike
+        # None (unset), which falls back to the global default.
+        return int(val)
 
     async def _resolve_max_runtime_sec(self, spec: dict[str, Any]) -> int | None:
-        """Resolve the absolute lifetime cap through the policy hierarchy: user, group,
-        organization, global.
+        """Resolve the absolute lifetime cap via the shared policy merge (app.domain.policy).
 
-        Takes the most specific policy with max_runtime > 0 (ResourcePolicy.max_runtime is in
-        **minutes**) and converts it to **seconds**, since the operator's gshare.io/max-runtime-sec is
-        in seconds. Unlike idle, there is no global fallback: when no scope sets a cap the result is
-        None and no annotation is attached.
+        ResourcePolicy.max_runtime is in **minutes**; the operator's gshare.io/max-runtime-sec is
+        in seconds. Unlike idle, there is no global fallback: when no scope sets a cap the result
+        is None and no annotation is attached.
         """
         if self.db is None:
             return None
-
-        async def _scoped(scope: str, scope_id: str) -> int | None:
-            pol = (
-                await self.db.scalars(
-                    select(ResourcePolicy).where(
-                        ResourcePolicy.scope == scope, ResourcePolicy.scope_id == scope_id
-                    )
-                )
-            ).first()
-            val = getattr(pol, "max_runtime", None) if pol is not None else None
-            return int(val) * 60 if val and int(val) > 0 else None
-
-        owner = spec.get("owner")
-        group_id = spec.get("group_id")
-        if owner:
-            v = await _scoped("user", owner)
-            if v is not None:
-                return v
-        if group_id:
-            v = await _scoped("group", group_id)
-            if v is not None:
-                return v
-            project = await self.db.get(Project, group_id)
-            if project is not None and project.org_id:
-                v = await _scoped("org", project.org_id)
-                if v is not None:
-                    return v
-        return await _scoped("global", "*")
+        pol = await resolve_effective_policy(self.db, spec.get("owner"), spec.get("group_id"))
+        val = pol.max_runtime if pol is not None else None
+        return int(val) * 60 if val and int(val) > 0 else None
 
     async def set_paused(
         self, cluster_id: str, session_id: str, paused: bool,
         *, pause_mode: str | None = None, preemptible: bool | None = None,
-        graceful_demote: bool | None = None,
+        graceful_demote: bool | None = None, pinned_gpu_uuid: str | None = None,
+        owner: str | None = None, group_id: str | None = None,
     ) -> None:
         """Patch spec.paused (+ pauseMode/preemptible) on the session CR.
 
@@ -368,10 +362,75 @@ class GShareSessionCRD:
             # yield→cold demotion: operator toggles VRAM back + lets the job checkpoint on SIGTERM
             # before deleting the Pod (fresh checkpoint). Set only when the card is not lent.
             body.append({"op": "add", "path": "/spec/gracefulDemote", "value": bool(graceful_demote)})
+        if pinned_gpu_uuid is not None:
+            # Per-card pools: a cold resume re-reserved a card, which may differ from the one the
+            # CR was created with — re-assert the pin so the recreated pod binds the NEW card.
+            body.append({"op": "add", "path": "/spec/pinnedGpuUuid", "value": str(pinned_gpu_uuid)})
+        if not paused and owner is not None and self.db is not None:
+            # A resume re-stamps the reaper annotations from the CURRENT policy: without this a
+            # policy edit never reaches live sessions — the CR keeps whatever the creation-time
+            # policy said, forever ("~1" is the JSON-Pointer escape for "/").
+            from app.core.config import settings  # lazy: keep module import-light
+
+            spec_like = {"owner": owner, "group_id": group_id}
+            idle = await self._resolve_idle_timeout_sec(spec_like)
+            if idle is None:
+                idle = settings.IDLE_TIMEOUT_SEC
+            if idle is not None and int(idle) >= 0:
+                body.append({
+                    "op": "add",
+                    "path": "/metadata/annotations/gshare.io~1idle-timeout-sec",
+                    "value": str(int(idle)),
+                })
+            max_sec = await self._resolve_max_runtime_sec(spec_like)
+            if max_sec and int(max_sec) > 0:
+                body.append({
+                    "op": "add",
+                    "path": "/metadata/annotations/gshare.io~1max-runtime-sec",
+                    "value": str(int(max_sec)),
+                })
         async with await self._client_factory(cluster) as api:
             await api.patch_namespaced_custom_object(
                 group=GROUP, version=VERSION, namespace=SESSION_NAMESPACE, plural=PLURAL,
                 name=name, body=body,
+            )
+
+    async def restamp_reaper(
+        self, cluster_id: str, session_id: str, owner: str | None, group_id: str | None
+    ) -> None:
+        """Merge-patch a live CR's idle/max-runtime annotations from the CURRENT policy.
+
+        Called on policy writes so a policy edit reaches RUNNING sessions immediately (not only
+        on the next resume). A dict body makes the client send merge-patch; a null value removes
+        the max-runtime annotation when the cap is lifted."""
+        from app.core.config import settings  # lazy: keep module import-light
+
+        spec_like = {"owner": owner, "group_id": group_id}
+        idle = await self._resolve_idle_timeout_sec(spec_like)
+        if idle is None:
+            idle = settings.IDLE_TIMEOUT_SEC
+        max_sec = await self._resolve_max_runtime_sec(spec_like)
+        # JSON-patch, the same shape the resume path uses: a dict body would be sent as
+        # json-patch content-type by the client and 400 on CRDs. "add" also replaces an
+        # existing key; "0" means unlimited/no-cap (the reaper reads both keys that way),
+        # which sidesteps remove-on-absent errors when a cap is lifted.
+        body = [
+            {
+                "op": "add",
+                "path": "/metadata/annotations/gshare.io~1idle-timeout-sec",
+                "value": str(int(idle)),
+            },
+            {
+                "op": "add",
+                "path": "/metadata/annotations/gshare.io~1max-runtime-sec",
+                "value": str(int(max_sec)) if max_sec and int(max_sec) > 0 else "0",
+            },
+        ]
+        cluster = await self._load_cluster(cluster_id)
+        async with await self._client_factory(cluster) as api:
+            await api.patch_namespaced_custom_object(
+                group=GROUP, version=VERSION, namespace=SESSION_NAMESPACE, plural=PLURAL,
+                name=_cr_name(session_id), body=body,
             )
 
     async def apply(
@@ -391,6 +450,7 @@ class GShareSessionCRD:
             **spec,
             "idle_timeout_sec": await self._resolve_idle_timeout_sec(spec),
             "max_runtime_sec": await self._resolve_max_runtime_sec(spec),
+            "volumes": await self._enrich_volumes(spec.get("volumes") or []),
         }
         body = self.build_object(spec, traceparent)
         name = body["metadata"]["name"]
@@ -515,6 +575,30 @@ class GShareSessionCRD:
                 return str(val)
         return str(getattr(sess, "image_id", None) or getattr(req, "image_id", ""))
 
+    async def _enrich_volumes(self, vols: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Attach each mount's StorageVolume facts (access class, provisioned quota) so the
+        operator can provision the backing PVC with the right access mode and size."""
+        if not vols or self.db is None:
+            return vols
+        from app.db.models import StorageVolume  # lazy: keep module import-light
+
+        ids_ = [v.get("volume_id") for v in vols if v.get("volume_id")]
+        if not ids_:
+            return vols
+        rows = {
+            sv.id: sv
+            for sv in (
+                await self.db.scalars(select(StorageVolume).where(StorageVolume.id.in_(ids_)))
+            ).all()
+        }
+        out = []
+        for v in vols:
+            sv = rows.get(v.get("volume_id"))
+            if sv is not None:
+                v = {**v, "access_mode": sv.access_mode, "size_gb": sv.quota_gb}
+            out.append(v)
+        return out
+
     def _volumes(self, req) -> list[dict[str, Any]]:
         mounts = getattr(req, "volume_mounts", None) or []
         out: list[dict[str, Any]] = []
@@ -538,3 +622,143 @@ class GShareSessionCRD:
 def _is_not_found(exc: Exception) -> bool:
     """True if a kubernetes_asyncio ApiException is a 404 (so get/delete can be idempotent)."""
     return getattr(exc, "status", None) == 404 or getattr(exc, "reason", None) == "Not Found"
+
+
+# ── GpuModeChange: card-level hami-core↔mig transitions (pool rebalancer → operator) ──
+MODECHANGE_PLURAL = "gpumodechanges"
+
+
+class GpuModeChangeCRD(GShareSessionCRD):
+    """Thin client for gshare.io/v1 GpuModeChange, reusing the session CRD's cluster plumbing.
+
+    The pool rebalancer creates one per card transition; the operator's migagent controller runs
+    the node Job and reports .status.phase, which the rebalancer polls before returning the card
+    to service.
+    """
+
+    @staticmethod
+    def name_for(device_id: str) -> str:
+        return _cr_name(f"gmc-{device_id}")
+
+    async def apply_change(
+        self, cluster_id: str, *, device_id: str, node_name: str,
+        gpu_uuid: str, gpu_index: int, target_mode: str,
+    ) -> None:
+        cluster = await self._load_cluster(cluster_id)
+        body = {
+            "apiVersion": f"{GROUP}/{VERSION}",
+            "kind": "GpuModeChange",
+            "metadata": {"name": self.name_for(device_id)},
+            "spec": {
+                "nodeName": node_name,
+                "gpuUuid": gpu_uuid,
+                "gpuIndex": gpu_index,
+                "targetMode": target_mode,
+            },
+        }
+        async with await self._client_factory(cluster) as api:
+            try:
+                await api.create_namespaced_custom_object(
+                    group=GROUP, version=VERSION, namespace=SESSION_NAMESPACE,
+                    plural=MODECHANGE_PLURAL, body=body,
+                )
+            except Exception as exc:  # noqa: BLE001
+                if getattr(exc, "status", None) != 409:  # AlreadyExists → the change is in flight
+                    raise
+
+    async def get_change(self, cluster_id: str, device_id: str) -> dict[str, Any] | None:
+        cluster = await self._load_cluster(cluster_id)
+        async with await self._client_factory(cluster) as api:
+            try:
+                return await api.get_namespaced_custom_object(
+                    group=GROUP, version=VERSION, namespace=SESSION_NAMESPACE,
+                    plural=MODECHANGE_PLURAL, name=self.name_for(device_id),
+                )
+            except Exception as exc:  # noqa: BLE001
+                if _is_not_found(exc):
+                    return None
+                raise
+
+    async def delete_change(self, cluster_id: str, device_id: str) -> None:
+        cluster = await self._load_cluster(cluster_id)
+        async with await self._client_factory(cluster) as api:
+            try:
+                await api.delete_namespaced_custom_object(
+                    group=GROUP, version=VERSION, namespace=SESSION_NAMESPACE,
+                    plural=MODECHANGE_PLURAL, name=self.name_for(device_id),
+                )
+            except Exception as exc:  # noqa: BLE001
+                if _is_not_found(exc):
+                    return
+                raise
+
+IB_PLURAL = "gshareimagebuilds"
+
+
+class GShareImageBuildCRD(GShareSessionCRD):
+    """Applies GShareImageBuild CRs (console-triggered kaniko builds).
+
+    Reuses the session CRD's cluster loading + kubeconfig-backed client factory; only the
+    group/plural and payload shape differ. Same hard boundary: the control plane expresses desired
+    state via the CR — the operator owns the Job."""
+
+    @staticmethod
+    def _ib_name(build_id: str) -> str:
+        return build_id.replace("_", "-").lower()
+
+    def build_ib_object(self, build) -> dict:
+        spec = {
+            "buildId": build.id,
+            "owner": build.owner_user_id or "",
+            "groupId": build.group_id,
+            "source": build.source,
+            "targetRef": build.image_ref or "",
+        }
+        if build.dockerfile:
+            spec["dockerfile"] = build.dockerfile
+        if build.git_url:
+            spec["gitUrl"] = build.git_url
+            spec["gitRef"] = build.git_ref or "main"
+            spec["contextSubPath"] = build.context or "."
+        if build.build_args:
+            spec["buildArgs"] = {str(k): str(v) for k, v in build.build_args.items()}
+        return {
+            "apiVersion": f"{GROUP}/{VERSION}",
+            "kind": "GShareImageBuild",
+            "metadata": {
+                "name": self._ib_name(build.id),
+                "namespace": SESSION_NAMESPACE,
+                "labels": {f"{GROUP}/image-build": self._ib_name(build.id)},
+            },
+            "spec": spec,
+        }
+
+    async def apply_build(self, cluster_id: str, build) -> None:
+        cluster = await self._load_cluster(cluster_id)
+        body = self.build_ib_object(build)
+        async with await self._client_factory(cluster) as api:
+            try:
+                await api.create_namespaced_custom_object(
+                    group=GROUP, version=VERSION, namespace=SESSION_NAMESPACE, plural=IB_PLURAL,
+                    body=body,
+                )
+            except Exception as exc:  # noqa: BLE001
+                if getattr(exc, "status", None) == 409:
+                    await api.patch_namespaced_custom_object(
+                        group=GROUP, version=VERSION, namespace=SESSION_NAMESPACE,
+                        plural=IB_PLURAL, name=body["metadata"]["name"], body=body,
+                    )
+                else:
+                    raise
+
+    async def delete_build(self, cluster_id: str, build_id: str) -> None:
+        cluster = await self._load_cluster(cluster_id)
+        async with await self._client_factory(cluster) as api:
+            try:
+                await api.delete_namespaced_custom_object(
+                    group=GROUP, version=VERSION, namespace=SESSION_NAMESPACE, plural=IB_PLURAL,
+                    name=self._ib_name(build_id),
+                )
+            except Exception as exc:  # noqa: BLE001
+                if not _is_not_found(exc):
+                    raise

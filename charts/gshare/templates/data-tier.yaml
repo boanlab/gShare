@@ -38,6 +38,7 @@ spec:
         {{- include "gshare.labels" . | nindent 8 }}
         {{- include "gshare.selectorLabels" (dict "component" "gshare-pg") | nindent 8 }}
     spec:
+      {{- include "gshare.controlPlaneNodeSelector" . | nindent 6 }}
       containers:
         - name: postgres
           image: {{ .Values.postgres.image }}
@@ -92,6 +93,7 @@ spec:
         {{- include "gshare.labels" . | nindent 8 }}
         {{- include "gshare.selectorLabels" (dict "component" "gshare-redis") | nindent 8 }}
     spec:
+      {{- include "gshare.controlPlaneNodeSelector" . | nindent 6 }}
       containers:
         - name: redis
           image: {{ .Values.redis.image }}

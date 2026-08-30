@@ -1,0 +1,79 @@
+# Session-image registry for the GShare cluster: originals live on the storage node's ZFS pool,
+# every node's containerd is just a cache that can always re-pull.
+#
+#   registry  (:5000, hostPort on gshare-storage) — push target for locally built session images.
+#   mirror    (:5001, hostPort on gshare-storage) — pull-through cache of docker.io, so public
+#             catalogue images are fetched from the LAN after the first pull.
+#
+# Plain HTTP on a trusted LAN (same layout as the bootstrap script's LOCAL_REGISTRY support);
+# moving to TLS later only changes the certs.d contents, not this manifest. Node trust lives in
+# /etc/containerd/certs.d on every node (hack/cluster-bootstrap.sh registry, with
+# LOCAL_REGISTRY=<node-ip>:5000 and LOCAL_REGISTRY_MIRROR=<node-ip>:5001). GC: `registry
+# garbage-collect` can be run in the pod.
+#
+# Pinning: the storage node labelled by `cluster-bootstrap.sh label <node> storage`
+# (gshare.io/role=storage). No storage node? Point nodeSelector at any node with disk and adjust
+# storageClassName below (gshare-data comes from the optional ZFS/democratic-csi step).
+apiVersion: v1
+kind: Namespace
+metadata: { name: registry }
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata: { name: registry-data, namespace: registry }
+spec:
+  storageClassName: gshare-data
+  accessModes: [ReadWriteOnce]
+  resources: { requests: { storage: 200Gi } }
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata: { name: mirror-data, namespace: registry }
+spec:
+  storageClassName: gshare-data
+  accessModes: [ReadWriteOnce]
+  resources: { requests: { storage: 300Gi } }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata: { name: registry, namespace: registry }
+spec:
+  replicas: 1
+  strategy: { type: Recreate }
+  selector: { matchLabels: { app: registry } }
+  template:
+    metadata: { labels: { app: registry } }
+    spec:
+      nodeSelector: { gshare.io/role: storage }
+      containers:
+        - name: registry
+          image: registry:2.8.3
+          env:
+            - { name: REGISTRY_STORAGE_DELETE_ENABLED, value: "true" }
+          ports: [{ containerPort: 5000, hostPort: 5000 }]
+          volumeMounts: [{ name: data, mountPath: /var/lib/registry }]
+          readinessProbe: { httpGet: { path: /v2/, port: 5000 }, initialDelaySeconds: 5 }
+      volumes:
+        - { name: data, persistentVolumeClaim: { claimName: registry-data } }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata: { name: mirror, namespace: registry }
+spec:
+  replicas: 1
+  strategy: { type: Recreate }
+  selector: { matchLabels: { app: mirror } }
+  template:
+    metadata: { labels: { app: mirror } }
+    spec:
+      nodeSelector: { gshare.io/role: storage }
+      containers:
+        - name: mirror
+          image: registry:2.8.3
+          env:
+            - { name: REGISTRY_PROXY_REMOTEURL, value: "https://registry-1.docker.io" }
+          ports: [{ containerPort: 5000, hostPort: 5001 }]
+          volumeMounts: [{ name: data, mountPath: /var/lib/registry }]
+          readinessProbe: { httpGet: { path: /v2/, port: 5000 }, initialDelaySeconds: 5 }
+      volumes:
+        - { name: data, persistentVolumeClaim: { claimName: mirror-data } }

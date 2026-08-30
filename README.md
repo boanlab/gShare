@@ -131,7 +131,8 @@ wallet is rejected. Volumes bill continuously for their provisioned capacity, wh
 a session is running.
 
 **Resource limits.** GPUs are allocated in per-model full-card fraction tiers — `fractional`
-for shared, `exclusive` for the whole card. MIG partitioning is not supported, and
+for shared, `exclusive` for the whole card. MIG is operated as a per-card POOL (admins move
+cards between hami-core and MIG; profile-aligned fractional tiers land on MIG instances), and
 asymmetric allocations across a card are rejected. Storage is capped by the `storage_gb`
 policy. Policies resolve most-specific first: user, then group, then organization, then
 global.

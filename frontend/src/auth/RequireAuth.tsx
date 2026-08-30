@@ -19,7 +19,7 @@ function useLoadMembershipContext(isAuthed: boolean) {
         if (cancelled) return;
         if (!data) { setMeLoaded(); return; }
         const ms = data.memberships;
-        setMeContext(ms, (data as { org_admin_orgs?: string[] }).org_admin_orgs ?? []);
+        setMeContext(ms, (data as { org_admin_orgs?: string[] }).org_admin_orgs ?? [], (data as { name?: string }).name ?? undefined);
         const cur = useAuthStore.getState().activeProjectId;
         if ((!cur || !ms.some((m) => m.group_id === cur)) && ms.length > 0) {
           setActiveProject(ms[0].group_id);

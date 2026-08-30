@@ -15,18 +15,31 @@ from typing import Any
 from fastapi import APIRouter, Depends, Query, Response, status
 from pydantic import BaseModel, Field
 from sqlalchemy import func, select
+from sqlalchemy import update as sa_update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import Pagination, get_current_principal
 from app.auth.rbac import Principal
 from app.core import ids
-from app.core.errors import DomainError, Forbidden, NotFound
+from app.core.errors import DomainError, Forbidden, InsufficientCredit, NotFound
 from app.db.base import get_db
-from app.db.models import CreditWallet, Membership, Organization, Project, User
+from app.db.models import (
+    AuditLog,
+    Cluster,
+    CreditTransaction,
+    CreditWallet,
+    Membership,
+    NodePool,
+    NodePoolGrant,
+    Organization,
+    Project,
+    User,
+)
 from app.db.models import Session as SessionModel
 from app.domain.audit_service import AuditService
 from app.domain.notification_service import NotificationService
+from app.domain.welcome_credit import grant_welcome_credit
 
 router = APIRouter(tags=["groups"])
 
@@ -66,6 +79,10 @@ class _Conflict(DomainError):
     code, http = "conflict", 409
 
 
+class _LastAdmin(DomainError):
+    code, http = "last_admin", 409
+
+
 class _Validation(DomainError):
     code, http = "validation_failed", 422
 
@@ -74,6 +91,8 @@ class _Validation(DomainError):
 class OrgCreate(BaseModel):
     name: str = Field(min_length=1, max_length=80)
     status: str | None = None
+    # Also create a dedicated node pool named after the organization, granted to it.
+    create_node_pool: bool = False
 
 
 class OrgUpdate(BaseModel):
@@ -86,11 +105,28 @@ class ProjectCreate(BaseModel):
     name: str = Field(min_length=1, max_length=80)
     status: str | None = None
     create_project_wallet: bool = True
+    # Credits minted into each new member's personal wallet on first join (0 = off).
+    default_member_credit: str | None = None
+    # Also create a dedicated node pool named after the group, granted to it.
+    create_node_pool: bool = False
 
 
 class ProjectPatch(BaseModel):
     name: str | None = Field(default=None, min_length=1, max_length=80)
     status: str | None = None
+    default_member_credit: str | None = None
+
+
+def _parse_credit(v: str | None) -> Decimal:
+    if v is None or str(v).strip() == "":
+        return Decimal("0")
+    try:
+        d = Decimal(str(v))
+    except (InvalidOperation, ValueError) as exc:
+        raise _Validation("invalid credit amount", {"value": v}) from exc
+    if d < 0:
+        raise _Validation("credit amount must be >= 0", {"value": v})
+    return d
 
 
 class MembershipCreate(BaseModel):
@@ -124,7 +160,7 @@ def _org_out(o: Organization, group_count: int = 0, user_count: int = 0) -> dict
     }
 
 
-async def _project_out(db: AsyncSession, p: Project) -> dict[str, Any]:
+async def _project_out(db: AsyncSession, p: Project, member_count: int | None = None) -> dict[str, Any]:
     # Include org_name so a group_admin, who has no org.read permission, can still display it.
     org_name = await db.scalar(select(Organization.name).where(Organization.id == p.org_id))
     return {
@@ -133,8 +169,13 @@ async def _project_out(db: AsyncSession, p: Project) -> dict[str, Any]:
         "org_name": org_name,
         "name": p.name,
         "status": p.status,
+        "default_member_credit": str(p.default_member_credit or 0),
         "created_at": p.created_at,
         "wallet_id": await _project_wallet_id(db, p.id),
+        # Group-membership count (org_admin rows have group_id NULL and are not counted).
+        "member_count": member_count if member_count is not None else int(await db.scalar(
+            select(func.count()).select_from(Membership).where(Membership.group_id == p.id)
+        ) or 0),
     }
 
 
@@ -191,7 +232,9 @@ async def list_organizations(
             await db.execute(
                 select(Project.org_id, func.count(func.distinct(Membership.user_id)))
                 .join(Membership, Membership.group_id == Project.id)
-                .where(Project.org_id.in_(org_ids), Project.deleted_at.is_(None))
+                .join(User, User.id == Membership.user_id)
+                .where(Project.org_id.in_(org_ids), Project.deleted_at.is_(None),
+                       User.deleted_at.is_(None))
                 .group_by(Project.org_id)
             )
         ).all():
@@ -219,6 +262,42 @@ async def get_organization(
     if o is None or o.deleted_at is not None:
         raise NotFound("organization not found", {"org_id": org_id})
     return _org_out(o)
+
+
+async def _auto_create_pool(
+    db: AsyncSession, actor: str, scope: str, scope_id: str, name: str,
+) -> str | None:
+    """Best-effort dedicated pool for a freshly created tenant, granted to it.
+
+    Placed on the sole (first live) cluster; with no live cluster the pool is skipped rather than
+    failing the org/group creation. A pool-name clash in that cluster gets a short id suffix."""
+    cluster = (await db.execute(
+        select(Cluster).where(Cluster.deleted_at.is_(None)).order_by(Cluster.created_at).limit(1)
+    )).scalars().first()
+    if cluster is None:
+        return None
+    pool_name = name
+    clash = (await db.execute(select(NodePool.id).where(
+        NodePool.cluster_id == cluster.id, NodePool.name == pool_name
+    ))).first()
+    if clash:
+        pool_name = f"{name}-{scope_id[-4:].lower()}"
+    pool = NodePool(
+        id=ids.new("pool"), cluster_id=cluster.id, name=pool_name,
+        description=None, kind="dedicated",
+    )
+    db.add(pool)
+    await db.flush()
+    db.add(NodePoolGrant(
+        id=ids.new("pool_grant"), pool_id=pool.id, scope=scope, scope_id=scope_id,
+        created_by=actor,
+    ))
+    await AuditService(db).record(
+        actor=actor, action="pool.create", target=pool.id, result="ok",
+        cluster_id=cluster.id, auto_created=True, granted_to=f"{scope}:{scope_id}",
+        changes={"name": {"from": None, "to": pool_name}, "kind": {"from": None, "to": "dedicated"}},
+    )
+    return pool.id
 
 
 @router.post("/organizations", status_code=status.HTTP_201_CREATED)
@@ -250,6 +329,8 @@ async def create_organization(
             reserved=Decimal("0"),
         )
     )
+    if body.create_node_pool:
+        await _auto_create_pool(db, principal.user_id, "org", org.id, org.name)
     await AuditService(db).record(
         actor=principal.user_id, action="org.create", target=org.id, result="ok", name=org.name
     )
@@ -279,7 +360,35 @@ async def update_organization(
         if body.status not in _ORG_STATUSES:
             raise _Validation("invalid status", {"status": body.status})
         changes["status"] = {"from": org.status, "to": body.status}
+        old_status = org.status
         org.status = body.status
+        # An organization's status flip runs down the hierarchy: every live group under it, then
+        # (via the group cascade rules) their sole-membership users.
+        gids = [gid for (gid,) in (await db.execute(
+            select(Project.id).where(Project.org_id == org_id, Project.deleted_at.is_(None))
+        )).all()]
+        if body.status == "inactive" and old_status == "active":
+            for gid in gids:
+                await db.execute(
+                    sa_update(Project).where(Project.id == gid, Project.status == "active")
+                    .values(status="inactive")
+                )
+            n = await _cascade_group_users(db, gids, "inactive", principal.user_id)
+            if n:
+                changes["cascade_users"] = {"from": 0, "to": n}
+            if gids:
+                changes["cascade_groups"] = {"from": 0, "to": len(gids)}
+        elif body.status == "active" and old_status == "inactive":
+            for gid in gids:
+                await db.execute(
+                    sa_update(Project).where(Project.id == gid, Project.status == "inactive")
+                    .values(status="active")
+                )
+            n = await _cascade_group_users(db, gids, "active", principal.user_id)
+            if n:
+                changes["cascade_users"] = {"from": 0, "to": n}
+            if gids:
+                changes["cascade_groups"] = {"from": 0, "to": len(gids)}
     if body.name is not None and body.name != org.name:
         changes["name"] = {"from": org.name, "to": body.name}
         org.name = body.name
@@ -356,7 +465,8 @@ async def list_org_admins(
         await db.execute(
             select(Membership, User.name, User.email)
             .join(User, User.id == Membership.user_id, isouter=True)
-            .where(Membership.org_id == org_id, Membership.role == "org_admin")
+            .where(Membership.org_id == org_id, Membership.role == "org_admin",
+                   User.deleted_at.is_(None))
             .order_by(Membership.created_at.asc())
         )
     ).all()
@@ -396,7 +506,8 @@ async def add_org_admin(
         raise _Conflict("user already an org admin", {"user_id": body.user_id}) from exc
     await NotificationService(db).notify(
         [body.user_id], "org_admin_added", "Appointed organization admin",
-        "You have been appointed an administrator of this organization.", org_id=org_id, role="org_admin",
+        "You have been appointed an administrator of this organization.",
+        org_id=org_id, role="org_admin",
     )
     await AuditService(db).record(
         actor=principal.user_id, action="org.admin.add", target=m.id, result="ok",
@@ -459,8 +570,18 @@ async def list_projects(
             .limit(pagination.size)
         )
     ).all()
+    # Batch the member counts for the page: one grouped query instead of one per row.
+    gids = [p.id for p in rows]
+    mcounts: dict[str, int] = {}
+    if gids:
+        mrows = (await db.execute(
+            select(Membership.group_id, func.count())
+            .where(Membership.group_id.in_(gids))
+            .group_by(Membership.group_id)
+        )).all()
+        mcounts = {gid: int(c) for gid, c in mrows}
     return {
-        "data": [await _project_out(db, p) for p in rows],
+        "data": [await _project_out(db, p, member_count=mcounts.get(p.id, 0)) for p in rows],
         "pagination": _page(pagination, total),
     }
 
@@ -503,7 +624,8 @@ async def create_project(
         raise NotFound("organization", {"org_id": body.org_id})
 
     project = Project(
-        id=ids.new("group"), org_id=body.org_id, name=body.name, status=body.status or "active"
+        id=ids.new("group"), org_id=body.org_id, name=body.name, status=body.status or "active",
+        default_member_credit=_parse_credit(body.default_member_credit),
     )
     db.add(project)
     await db.flush()
@@ -518,12 +640,78 @@ async def create_project(
                 reserved=Decimal("0"),
             )
         )
+    if body.create_node_pool:
+        await _auto_create_pool(db, principal.user_id, "group", project.id, project.name)
     await AuditService(db).record(
         actor=principal.user_id, action="group.create", target=project.id, result="ok",
         org_id=body.org_id, name=project.name, wallet=body.create_project_wallet,
     )
     await db.commit()
     return await _project_out(db, project)
+
+
+
+async def _cascade_group_users(
+    db: AsyncSession, group_ids: list[str], to_status: str, actor: str,
+) -> int:
+    """Deactivate/reactivate the users of the given groups, honouring multi-membership.
+
+    Deactivate: only users whose EVERY OTHER group membership is in an inactive/archived or
+    deleted group go inactive — someone also in an active department keeps working.
+    Reactivate: only users this cascade froze (marked via the audit reason on their row change —
+    approximated here as: user is inactive AND has no other reason recorded, i.e. they are members
+    of the reactivated group and hold no membership in another ACTIVE group that would have kept
+    them active). Individually-deactivated users therefore stay put unless this group was their
+    only home. Returns the number of users changed."""
+    if not group_ids:
+        return 0
+    member_ids = [uid for (uid,) in (await db.execute(
+        select(Membership.user_id).where(Membership.group_id.in_(group_ids)).distinct()
+    )).all()]
+    if not member_ids:
+        return 0
+    # Which of those users hold a membership in some OTHER group that is still active?
+    others = (await db.execute(
+        select(Membership.user_id).join(Project, Project.id == Membership.group_id).where(
+            Membership.user_id.in_(member_ids),
+            Membership.group_id.notin_(group_ids),
+            Project.deleted_at.is_(None),
+            Project.status == "active",
+        ).distinct()
+    )).all()
+    keep = {uid for (uid,) in others}
+    targets = [uid for uid in member_ids if uid not in keep]
+    if not targets:
+        return 0
+    users = (await db.scalars(select(User).where(User.id.in_(targets)))).all()
+    changed = 0
+    for u in users:
+        if to_status == "inactive" and u.status == "active":
+            u.status = "inactive"
+            changed += 1
+            await AuditService(db).record(
+                actor=actor, action="user.update", target=u.id, result="ok",
+                changes={"status": {"from": "active", "to": "inactive"}},
+                reason="group_deactivated",
+            )
+        elif to_status == "active" and u.status == "inactive":
+            # Reactivation only lifts users this cascade plausibly froze: their last status change
+            # to inactive carries reason=group_deactivated in the audit trail.
+            last = (await db.execute(
+                select(AuditLog.detail).where(
+                    AuditLog.action == "user.update", AuditLog.target == u.id,
+                ).order_by(AuditLog.created_at.desc()).limit(1)
+            )).first()
+            reason = (last[0] or {}).get("reason") if last else None
+            if reason == "group_deactivated":
+                u.status = "active"
+                changed += 1
+                await AuditService(db).record(
+                    actor=actor, action="user.update", target=u.id, result="ok",
+                    changes={"status": {"from": "inactive", "to": "active"}},
+                    reason="group_reactivated",
+                )
+    return changed
 
 
 @router.patch("/projects/{group_id}")
@@ -537,14 +725,30 @@ async def update_project(
     principal.require(action="group.update", group_id=group_id)
     project = await _load_project(db, group_id)
     changes: dict[str, Any] = {}
+    cascade_users = 0
     if body.status is not None and body.status != project.status:
         if body.status not in _PROJECT_STATUSES:
             raise _Validation("invalid status", {"status": body.status})
         changes["status"] = {"from": project.status, "to": body.status}
+        old_status = project.status
         project.status = body.status
+        # Deactivating a department freezes its members too (unless they belong to another
+        # active department); reactivating lifts exactly the users this cascade froze.
+        if body.status in ("inactive", "archived") and old_status == "active":
+            cascade_users = await _cascade_group_users(db, [group_id], "inactive", principal.user_id)
+        elif body.status == "active" and old_status in ("inactive", "archived"):
+            cascade_users = await _cascade_group_users(db, [group_id], "active", principal.user_id)
+        if cascade_users:
+            changes["cascade_users"] = {"from": 0, "to": cascade_users}
     if body.name is not None and body.name != project.name:
         changes["name"] = {"from": project.name, "to": body.name}
         project.name = body.name
+    if body.default_member_credit is not None:
+        new_credit = _parse_credit(body.default_member_credit)
+        if new_credit != project.default_member_credit:
+            changes["default_member_credit"] = {
+                "from": str(project.default_member_credit), "to": str(new_credit)}
+            project.default_member_credit = new_credit
     if changes:
         await db.flush()
         await AuditService(db).record(
@@ -612,7 +816,7 @@ async def list_memberships(
         await db.execute(
             select(Membership, User.name)
             .join(User, User.id == Membership.user_id, isouter=True)
-            .where(Membership.group_id == group_id)
+            .where(Membership.group_id == group_id, User.deleted_at.is_(None))
             .order_by(Membership.created_at.asc())
         )
     ).all()
@@ -628,7 +832,7 @@ async def add_membership(
 ):
     """Add a member or grant a role. A guest must carry expires_at. super_admin or group_admin."""
     principal.require(action="membership.create", group_id=group_id)
-    await _load_project(db, group_id)
+    group = await _load_project(db, group_id)
     if body.role not in _MEMBERSHIP_ROLES:
         raise _Validation("invalid role", {"role": body.role})
     _guard_grant_rank(principal, group_id, body.role)
@@ -668,9 +872,52 @@ async def add_membership(
     except IntegrityError as exc:
         await db.rollback()
         raise _Conflict("user already a member", {"user_id": body.user_id}) from exc
+
+    # Group-configured welcome credit: minted once per (group, user), like the monthly refill.
+    await grant_welcome_credit(db, body.user_id, group)
+
+    # A welcome grant actually MOVES credit (group wallet -> personal wallet). It used to be
+    # recorded in the audit log without moving anything — a silent lie; now a short group wallet
+    # rejects the request instead.
+    if grant is not None and Decimal(grant) > 0:
+        amount = Decimal(grant)
+        src = await db.scalar(
+            select(CreditWallet)
+            .where(CreditWallet.owner_type == "group", CreditWallet.owner_id == group_id)
+            .with_for_update()
+        )
+        dst = await db.scalar(
+            select(CreditWallet)
+            .where(CreditWallet.owner_type == "user", CreditWallet.owner_id == body.user_id)
+            .with_for_update()
+        )
+        if src is None or dst is None:
+            raise _Validation("grant_credit needs both the group and the user wallet",
+                              {"group_id": group_id, "user_id": body.user_id})
+        available = src.balance - src.reserved
+        if available < amount:
+            raise InsufficientCredit(available=available, need=amount)
+        src.balance -= amount
+        src.version += 1
+        dst.balance += amount
+        dst.version += 1
+        db.add_all([
+            CreditTransaction(
+                id=ids.new("transaction"), wallet_id=src.id, type="adjust", amount=-amount,
+                balance_after=src.balance, ref=f"member-grant-out:{dst.id}",
+                idempotency_key=f"member-grant:{m.id}:out",
+            ),
+            CreditTransaction(
+                id=ids.new("transaction"), wallet_id=dst.id, type="adjust", amount=amount,
+                balance_after=dst.balance, ref=f"member-grant-in:{src.id}",
+                idempotency_key=f"member-grant:{m.id}:in",
+            ),
+        ])
+
     await NotificationService(db).notify(
         [body.user_id], "membership_added", "Added to a group",
-        f"You were added to the group with the '{body.role}' role.", group_id=group_id, role=body.role,
+        f"You were added to the group with the '{body.role}' role.",
+        params={"role": body.role}, group_id=group_id, role=body.role,
     )
     await AuditService(db).record(
         actor=principal.user_id, action="membership.create", target=m.id, result="ok",
@@ -702,7 +949,8 @@ async def update_membership(
     await db.flush()
     await NotificationService(db).notify(
         [m.user_id], "membership_role_changed", "Role changed",
-        f"Your role in the group changed from '{old}' to '{body.role}'.", group_id=group_id,
+        f"Your role in the group changed from '{old}' to '{body.role}'.",
+        params={"old_role": old, "new_role": body.role}, group_id=group_id,
     )
     await AuditService(db).record(
         actor=principal.user_id, action="membership.update", target=membership_id, result="ok",
@@ -767,11 +1015,13 @@ async def _guard_last_admin(db: AsyncSession, group_id: str, exclude: str) -> No
     remaining = await db.scalar(
         select(func.count())
         .select_from(Membership)
+        .join(User, User.id == Membership.user_id)
         .where(
             Membership.group_id == group_id,
             Membership.role.in_(_ADMIN_ROLES),
             Membership.id != exclude,
+            User.deleted_at.is_(None),
         )
     ) or 0
     if int(remaining) == 0:
-        raise _Conflict("cannot remove/demote the last admin of the project", {"group_id": group_id})
+        raise _LastAdmin("cannot remove/demote the last admin of the project", {"group_id": group_id})

@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
+import type { Session } from '@/api/types';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { api, idemKey } from '@/api/client';
 import { useAuthStore } from '@/auth/authStore';
@@ -36,7 +37,8 @@ export function useAllSessions(filter: SessionMonitorFilter = {}, livePaused = f
       const { data } = await api.GET('/api/v1/sessions', {
         params: { query: { status: filter.status, group_id: filter.group_id, page: filter.page, size: filter.size, scope: 'all' } },
       });
-      return data ?? [];
+      const env = data as unknown as { data?: Session[] } | Session[] | undefined;
+      return Array.isArray(env) ? env : env?.data ?? [];
     },
     refetchInterval: livePaused ? 4000 : false,
     placeholderData: (prev) => prev,
@@ -99,11 +101,11 @@ export function useClusterMetrics(query: { region?: string } = {}, opts?: { enab
 export function useForceTerminate() {
   const qc = useQueryClient();
   return useMutation({
-    // The backend takes no request body here (the reason is not accepted), so only the path and the
-    // idempotency key are sent.
-    mutationFn: async ({ sessionId }: { sessionId: string; reason: string }) => {
+    mutationFn: async ({ sessionId, reason }: { sessionId: string; reason: string }) => {
       const { data } = await api.POST('/api/v1/sessions/{session_id}/force-terminate', {
         params: { path: { session_id: sessionId } },
+        // The justification the console requires — recorded in the audit log server-side.
+        body: { reason } as never,
         headers: { 'Idempotency-Key': idemKey() },
       });
       return data;
@@ -157,6 +159,10 @@ export function useSessionsStream(opts: MonitorSseOptions = {}) {
     const refresh = () => {
       qc.invalidateQueries({ queryKey: ['monitor', 'sessions'] });
       qc.invalidateQueries({ queryKey: ['monitor', 'queue'] });
+      qc.invalidateQueries({ queryKey: ['sessions'] });
+      qc.invalidateQueries({ queryKey: ['dashboard'] });
+      qc.invalidateQueries({ queryKey: ['gpu-availability'] });
+      qc.invalidateQueries({ queryKey: ['wallet'] });
     };
 
     es.onopen = () => setConnected(true);
@@ -176,4 +182,26 @@ export function useSessionsStream(opts: MonitorSseOptions = {}) {
   }, [optsKey, qc]); // eslint-disable-line react-hooks/exhaustive-deps
 
   return { connected };
+}
+
+// GET /monitoring/sessions/{id}/usage — measured live usage for the monitor drawer:
+// cadvisor CPU/MEM plus HAMi per-session VRAM and GPU-core utilization.
+export interface SessionUsage {
+  cpu_cores: number | null;
+  mem_bytes: number | null;
+  gpu_core_pct: number | null;
+  vram_bytes: number | null;
+}
+export function useSessionUsage(id?: string) {
+  return useQuery({
+    queryKey: ['monitor', 'session-usage', id ?? ''],
+    enabled: !!id,
+    refetchInterval: 10000,
+    queryFn: async () => {
+      const { data } = await (api as unknown as {
+        GET: (p: string, i?: { params?: { path?: Record<string, string> } }) => Promise<{ data?: unknown }>;
+      }).GET('/api/v1/monitoring/sessions/{session_id}/usage', { params: { path: { session_id: id as string } } });
+      return data as SessionUsage;
+    },
+  });
 }

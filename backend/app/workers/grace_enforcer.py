@@ -18,6 +18,7 @@ from app.core.logging import get_logger
 from app.core.redis import get_redis
 from app.db.base import get_sessionmaker
 from app.db.models import Allocation, CreditWallet, GpuDevice, GpuNode, Session
+from app.domain.notification_service import NotificationService
 from app.domain.session_service import GRACE_PERIOD_SEC, SessionService
 
 log = get_logger(__name__)
@@ -56,9 +57,30 @@ async def run() -> None:
         except (TypeError, ValueError):
             await redis.delete(key)
             continue
-        if elapsed < GRACE_PERIOD_SEC:
-            continue  # still inside the grace period
         sid = key.split("grace:", 1)[1]
+        if elapsed < GRACE_PERIOD_SEC:
+            # Still inside the grace window — warn the owner ONCE that the pause is coming, so a
+            # top-up can prevent it. The marker outlives the window, so guard with NX.
+            if await redis.set(f"grace-warned:{sid}", "1", nx=True, ex=GRACE_PERIOD_SEC * 6):
+                minutes = max(1, int((GRACE_PERIOD_SEC - elapsed) // 60))
+                async with maker() as db:
+                    sess = await db.get(Session, sid)
+                    if sess is not None and sess.status == "running":
+                        # db.get autobegan a read tx; close it (commit, not rollback — rollback
+                        # expires the ORM object) so begin() below owns a clean transaction.
+                        # Without this the warn crashed every time and, because the NX marker was
+                        # already consumed, the pre-pause warning was silently lost for good.
+                        await db.commit()
+                        async with db.begin():
+                            await NotificationService(db).notify(
+                                [sess.owner_user_id], "grace_started",
+                                "Credits exhausted: session pauses soon",
+                                f"Session '{sess.name or sess.id}' is out of credits and will be "
+                                f"paused in about {minutes} minute(s) unless you top up.",
+                                params={"session_name": sess.name or sess.id, "minutes": minutes},
+                                session_id=sid, reason="credit_exhausted",
+                            )
+            continue
         async with maker() as db:
             sess = await db.get(Session, sid)
             if sess is None or sess.status != "running":
@@ -74,7 +96,7 @@ async def run() -> None:
             # Grace expired and still short: pause gracefully, so the app checkpoints on SIGTERM
             # before the GPU is returned.
             try:
-                await SessionService(db).stop(sid)
+                await SessionService(db).stop(sid, reason="credit_exhausted")
                 # Mark the pause as credit-driven; the value is the yield timestamp. On a top-up the
                 # resume pass reclaims losslessly; without one, exceeding YIELD_RESERVATION_TTL
                 # demotes to durable, so a lossless hold cannot occupy memory indefinitely.

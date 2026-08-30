@@ -1,0 +1,84 @@
+# democratic-csi, zfs-generic-nfs: GShare's volume backend on the storage node.
+#
+# One ZFS dataset per PVC with refquota = the claim size, exported over NFS. Inside a session `df`
+# shows exactly the volume's quota and writes past it fail with ENOSPC — the guarantee local-path
+# could not give. Installed by `hack/cluster-bootstrap.sh storage-csi <ip> <key>`, which fills in
+# the per-cluster values (host, SSH key, pool) with --set; everything here is cluster-independent.
+#
+# RWO, RWX, and ROX all come from this one class: NFS serves every access mode and the CSI layer
+# still enforces single-node attach for RWO. An iSCSI (zvol) class can be added beside it later for
+# block-level performance without touching this one.
+
+csiDriver:
+  name: org.democratic-csi.gshare-nfs
+  attachRequired: false        # NFS needs no attach/detach step; skipping it removes a controller round-trip
+  fsGroupPolicy: File
+
+controller:
+  # No VolumeSnapshot CRDs are installed on the bootstrap cluster; the sidecar would crash-loop.
+  # Enable together with the external-snapshotter CRDs when snapshots are wanted from Kubernetes
+  # (ZFS-side snapshots on the storage node work regardless).
+  externalSnapshotter:
+    enabled: false
+  externalAttacher:
+    enabled: false
+  externalResizer:
+    enabled: true              # online quota growth: PVC resize → zfs set refquota
+  externalProvisioner:
+    extraArgs:
+      - --leader-election
+      - --leader-election-namespace={{ .Release.Namespace }}
+      - --timeout=90s
+      - --worker-threads=10
+      - --extra-create-metadata
+      - --csi-address={{ .csiSocketAddress }}
+  # Keep the controller off the storage node itself (tainted) and off GPU nodes' scarce RAM.
+  tolerations: []
+
+node:
+  # The node plugin must run wherever a session can mount a volume — every worker — but there is
+  # nothing to mount on the storage node, which is tainted anyway.
+  tolerations: []
+
+storageClasses:
+  - name: gshare-data
+    defaultClass: false
+    reclaimPolicy: Delete
+    volumeBindingMode: Immediate
+    allowVolumeExpansion: true
+    parameters:
+      fsType: nfs
+    mountOptions:
+      - noatime
+      - nfsvers=4.1
+      - hard
+      - timeo=600
+      - retrans=2
+
+volumeSnapshotClasses: []
+
+driver:
+  config:
+    driver: zfs-generic-nfs
+    sshConnection:
+      host: ""                 # set by cluster-bootstrap.sh storage-csi
+      port: 22
+      username: gshare-csi
+      privateKey: ""           # set by cluster-bootstrap.sh storage-csi (--set-file)
+    zfs:
+      cli:
+        sudoEnabled: true
+      datasetParentName: gshare/volumes
+      detachedSnapshotsDatasetParentName: gshare/snapshots
+      datasetEnableQuotas: true         # refquota = claim size: the df-visible limit
+      datasetEnableReservation: false   # thin: a 50Gi quota does not pin 50Gi of the pool
+      datasetPermissionsMode: "0777"    # sessions run as arbitrary non-root UIDs
+      datasetPermissionsUser: 0
+      datasetPermissionsGroup: 0
+    nfs:
+      shareStrategy: setDatasetProperties
+      shareStrategySetDatasetProperties:
+        properties:
+          # no_root_squash: the kubelet mounts as root and the CSI chmods the export root.
+          sharenfs: "rw,no_subtree_check,no_root_squash"
+      shareHost: ""            # set by cluster-bootstrap.sh storage-csi

@@ -52,6 +52,15 @@ type Builder struct {
 	// cards as preemptible capacity, fractional/multi-borrow). When false (default — stock HAMi),
 	// borrow falls back to the device-plugin BYPASS: NVIDIA_VISIBLE_DEVICES + node pin, exclusive only.
 	HAMiYieldExtender bool
+	// SessionImagePullPolicy is the pull policy for session containers. IfNotPresent (the
+	// default) lets air-gapped sites and locally imported images run; Always forces a registry
+	// manifest check so a re-pushed fixed-tag catalogue image is picked up.
+	SessionImagePullPolicy corev1.PullPolicy
+	// PerCardMode drops the gshare.io/gpu-mode nodeSelector pools: every GPU session flows
+	// through hami-scheduler pinned to the ledger-reserved card (spec.pinnedGpuUuid), and
+	// exclusive is expressed as the full card (gpumem-percentage=100 + gpucores=100). Off (the
+	// default), the legacy node-pool arms are used verbatim.
+	PerCardMode bool
 }
 
 // randToken returns a 48-hex random token for the per-session proxy credential.
@@ -128,16 +137,29 @@ func (b *Builder) BuildPod(s *gsharev1.GShareSession) *corev1.Pod {
 		spec.RuntimeClassName = &rc
 
 	case s.Spec.Mode == "fractional":
-		// HAMi vGPU: gpumem/gpucores + hami-scheduler.
+		// HAMi vGPU: gpumem/gpucores + hami-scheduler. Per-card mode drops the node pool
+		// selector — the ledger's reservation (pinnedGpuUuid, annotated below) IS the placement.
 		spec.RuntimeClassName = &rc
 		spec.SchedulerName = "hami-scheduler"
-		spec.NodeSelector["gshare.io/gpu-mode"] = "fractional"
+		if !b.PerCardMode {
+			spec.NodeSelector["gshare.io/gpu-mode"] = "fractional"
+		}
 		limits["nvidia.com/gpu"] = resource.MustParse("1")
 		limits["nvidia.com/gpumem"] = resource.MustParse(strconv.Itoa(s.Spec.GpuMemMb))
 		limits["nvidia.com/gpucores"] = resource.MustParse(strconv.Itoa(s.Spec.GpuCores))
 
+	case s.Spec.Mode == "exclusive" && (b.PerCardMode || s.Spec.FullCard):
+		// Exclusive THROUGH hami-scheduler: the whole card as a 100% slice — the exact shape the
+		// borrow path already runs — so exclusive sessions share the scheduler and the UUID pin
+		// with fractional ones and node-level exclusive pools are unnecessary.
+		spec.RuntimeClassName = &rc
+		spec.SchedulerName = "hami-scheduler"
+		limits["nvidia.com/gpu"] = resource.MustParse("1")
+		limits["nvidia.com/gpumem-percentage"] = resource.MustParse("100")
+		limits["nvidia.com/gpucores"] = resource.MustParse("100")
+
 	case s.Spec.Mode == "exclusive":
-		// Exclusive: standard device-plugin, no hami-scheduler.
+		// Legacy exclusive: standard device-plugin, no hami-scheduler, node-pool selector.
 		spec.RuntimeClassName = &rc
 		spec.NodeSelector["gshare.io/gpu-mode"] = "exclusive"
 		limits["nvidia.com/gpu"] = resource.MustParse("1")
@@ -183,12 +205,14 @@ func (b *Builder) BuildPod(s *gsharev1.GShareSession) *corev1.Pod {
 	limits[corev1.ResourceMemory] = memQ
 	limits[corev1.ResourceEphemeralStorage] = diskQ
 
+	pullPolicy := b.SessionImagePullPolicy
+	if pullPolicy == "" {
+		pullPolicy = corev1.PullIfNotPresent
+	}
 	spec.Containers = []corev1.Container{{
-		Name:  "session",
-		Image: s.Spec.Image,
-		// Always check the registry so an update to a fixed-tag catalogue image is picked up. Layers
-		// stay cached, so this costs a manifest check.
-		ImagePullPolicy: corev1.PullAlways,
+		Name:            "session",
+		Image:           s.Spec.Image,
+		ImagePullPolicy: pullPolicy,
 		// PSA restricted: no privilege escalation + drop all caps. seccomp/runAsNonRoot are on the pod
 		// securityContext. GPU is accessed via the nvidia runtime/device-plugin (no caps needed).
 		SecurityContext: &corev1.SecurityContext{
@@ -223,6 +247,12 @@ func (b *Builder) BuildPod(s *gsharev1.GShareSession) *corev1.Pod {
 		podAnnos = map[string]string{
 			"gshare.io/preemptible":  "true",
 			"nvidia.com/use-gpuuuid": s.Spec.BorrowedGpuUuid,
+		}
+	} else if s.Spec.PinnedGpuUuid != "" && spec.SchedulerName == "hami-scheduler" {
+		// Ledger-pinned placement: the control plane reserved a specific card, so hami-scheduler
+		// must bind exactly that card — reservation and physical binding can no longer diverge.
+		podAnnos = map[string]string{
+			"nvidia.com/use-gpuuuid": s.Spec.PinnedGpuUuid,
 		}
 	}
 
@@ -288,28 +318,44 @@ func (b *Builder) env(s *gsharev1.GShareSession) []corev1.EnvVar {
 }
 
 // mounts maps VolumeSpec -> VolumeMount.
+// SanitizeVolumeName turns a control-plane volume id (vol_01ABC..., uppercase + underscore)
+// into an RFC 1123 name usable as a PVC name and a pod volume name — the same convention the
+// session CR name uses. Kubernetes rejects the raw id outright, which used to fail pod creation.
+const (
+	// VolumeLabel marks the PVCs the operator provisions behind session volumes.
+	VolumeLabel = "gshare.io/volume"
+	// VolumeIDAnnotation carries the control plane's volume id verbatim (the PVC name is its
+	// sanitized form), so the ledger can be matched exactly.
+	VolumeIDAnnotation = "gshare.io/volume-id"
+)
+
+func SanitizeVolumeName(name string) string {
+	return strings.ToLower(strings.ReplaceAll(name, "_", "-"))
+}
+
 func (b *Builder) mounts(s *gsharev1.GShareSession) []corev1.VolumeMount {
 	out := make([]corev1.VolumeMount, 0, len(s.Spec.Volumes))
 	for _, v := range s.Spec.Volumes {
 		out = append(out, corev1.VolumeMount{
-			Name:      v.Name,
+			Name:      SanitizeVolumeName(v.Name),
 			MountPath: v.MountPath,
-			ReadOnly:  v.Mode == "ReadOnlyMany",
+			ReadOnly:  v.ReadOnly || v.Mode == "ReadOnlyMany",
 		})
 	}
 	return out
 }
 
-// volumes maps VolumeSpec -> PVC-backed Volume.
+// volumes maps VolumeSpec -> PVC-backed Volume. The PVC itself is ensured by the reconciler
+// (ensureVolumeClaims) before the pod is created.
 func (b *Builder) volumes(s *gsharev1.GShareSession) []corev1.Volume {
 	out := make([]corev1.Volume, 0, len(s.Spec.Volumes))
 	for _, v := range s.Spec.Volumes {
 		out = append(out, corev1.Volume{
-			Name: v.Name,
+			Name: SanitizeVolumeName(v.Name),
 			VolumeSource: corev1.VolumeSource{
 				PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
-					ClaimName: v.Name,
-					ReadOnly:  v.Mode == "ReadOnlyMany",
+					ClaimName: SanitizeVolumeName(v.Name),
+					ReadOnly:  v.ReadOnly || v.Mode == "ReadOnlyMany",
 				},
 			},
 		})

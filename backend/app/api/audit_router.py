@@ -241,9 +241,13 @@ async def list_audit_logs(
     # Map actor ULIDs to names so the UI can show a name.
     actor_ids = {r.actor for r in rows if r.actor}
     names: dict[str, str] = {}
+    emails: dict[str, str] = {}
     if actor_ids:
-        nrows = (await db.execute(select(User.id, User.name).where(User.id.in_(actor_ids)))).all()
-        names = {uid: nm for uid, nm in nrows}
+        nrows = (await db.execute(
+            select(User.id, User.name, User.email).where(User.id.in_(actor_ids))
+        )).all()
+        names = {uid: nm for uid, nm, _ in nrows}
+        emails = {uid: em for uid, _, em in nrows if em}
 
     target_names = await _resolve_target_names(db, list(rows))
 
@@ -296,7 +300,8 @@ async def list_audit_logs(
 
     out: dict = {
         "data": [
-            {**_audit_view(r), "actor_name": names.get(r.actor), "target_name": target_names.get(r.target)}
+            {**_audit_view(r), "actor_name": names.get(r.actor),
+            "actor_email": emails.get(r.actor), "target_name": target_names.get(r.target)}
             for r in rows
         ],
         "names": id_names,

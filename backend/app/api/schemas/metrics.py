@@ -18,10 +18,24 @@ class NodeRow(BaseModel):
     status: str
     cpu: int
     mem_gb: int
+    disk_gb: int = 0
+    role: str | None = None            # master|gpu|cpu|storage (operator-derived)
     region: str
     gpu_mode: str
+    # Per-card pool counts on the node, e.g. {"fractional": 2, "mig": 1}.
+    mode_counts: dict[str, int] = {}
     device_count: int
+    # Host compute promised to sessions holding a live allocation on this node's cards. CPU-class
+    # sessions are placed by the k8s scheduler, not the ledger, so they are not attributed here.
+    alloc_cpu: int = 0
+    alloc_mem_gb: int = 0
+    alloc_disk_gb: int = 0
+    # Sessions currently running on this node (operator-reported node_hostname; CPU ones too).
+    running_sessions: int = 0
     heartbeat_at: str | None = None
+    # Node pool membership; None means the node is shared (usable by every tenant).
+    pool_id: str | None = None
+    pool_name: str | None = None
 
 
 class NodeList(BaseModel):
@@ -41,6 +55,9 @@ class GpuDeviceRow(BaseModel):
     node_id: str
     model: str
     mode: str
+    # Per-card pool target + drain state (ready|draining|applying|error); see gpu_device model.
+    desired_mode: str | None = None
+    mode_state: str = "ready"
     status: str
     gpu_uuid: str
     total_mem_mb: int
@@ -85,12 +102,37 @@ class ClusterCredit(BaseModel):
     active_holds: str
 
 
+class ClusterResource(BaseModel):
+    """One host-compute dimension fleet-wide: promised to active sessions vs node capacity."""
+
+    used: int
+    total: int
+
+
+class ClusterCompute(BaseModel):
+    cpu: ClusterResource
+    mem_gb: ClusterResource
+    disk_gb: ClusterResource
+
+
+class ClusterStorageDisk(BaseModel):
+    used: int   # provisioned volume quota (GiB) — allocation, not bytes on disk
+    total: int  # storage-server host disk capacity (GB)
+
+
+class ClusterStorage(BaseModel):
+    disk_gb: ClusterStorageDisk
+    node_count: int = 0
+
+
 class ClusterMetrics(BaseModel):
     as_of: str
     nodes: ClusterNodes
     gpu: ClusterGpu
     sessions: ClusterSessions
     credit: ClusterCredit
+    compute: ClusterCompute
+    storage: ClusterStorage | None = None
 
 
 # ── GET /metrics/billing-report ──

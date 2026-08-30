@@ -19,9 +19,10 @@ export interface AllocRequest {
   level: 'user' | 'group' | 'org'; fulfiller_scope: 'group' | 'org' | 'system';
   fulfiller_id?: string | null; fulfiller_name?: string | null; group_name?: string | null; amount: string; status: string; note?: string | null;
   parent_id?: string | null; created_at?: string;
+  decided_reason?: string | null;  // why it was rejected — shown to the requester
 }
 
-export function useAllocationRequests(box: 'incoming' | 'mine') {
+export function useAllocationRequests(box: 'incoming' | 'mine' | 'handled') {
   return useQuery({
     queryKey: ['alloc-reqs', box],
     refetchInterval: 8000,
@@ -43,13 +44,13 @@ export function useCreateAllocationRequest() {
   });
 }
 
-function reqAction(action: 'approve' | 'reject' | 'escalate') {
+function reqAction(action: 'approve' | 'reject') {
   return function useReqAction() {
     const qc = useQueryClient();
     return useMutation({
       mutationFn: async ({ id, body }: { id: string; body?: unknown }) => {
-        const { data } = await raw.POST(`/credits/allocation-requests/{id}/${action}` as string, {
-          params: { path: { id } },
+        const { data } = await raw.POST(`/api/v1/credits/allocation-requests/{request_id}/${action}` as string, {
+          params: { path: { request_id: id } },
           body: body ?? {},
           headers: { 'Idempotency-Key': idemKey() },
         });
@@ -61,7 +62,6 @@ function reqAction(action: 'approve' | 'reject' | 'escalate') {
 }
 export const useApproveRequest = reqAction('approve');
 export const useRejectRequest = reqAction('reject');
-export const useEscalateRequest = reqAction('escalate');
 
 // Allocate or reclaim: the hierarchical form of a transfer, taking a source wallet, a target
 // wallet, and an amount.
@@ -73,6 +73,30 @@ export function useAllocate() {
       return data;
     },
     onSuccess: () => { qc.invalidateQueries({ queryKey: ['alloc-wallets'] }); qc.invalidateQueries({ queryKey: ['alloc-scope'] }); },
+  });
+}
+
+// Group-wide allocate: the same amount from the group's wallet to every member wallet at once.
+export function useBulkAllocate() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: async (body: { group_id: string; amount: string; reason?: string }) => {
+      const { data } = await raw.POST('/api/v1/credits/bulk-allocate', { body, headers: { 'Idempotency-Key': idemKey() } });
+      return data;
+    },
+    onSuccess: () => { qc.invalidateQueries({ queryKey: ['alloc-wallets'] }); qc.invalidateQueries({ queryKey: ['alloc-scope'] }); },
+  });
+}
+
+// Group-wide monthly grant: the same refill on every member wallet, one ceiling check.
+export function useBulkMonthlyGrant() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: async (body: { group_id: string; amount: string }) => {
+      const { data } = await raw.POST('/api/v1/credits/bulk-monthly-grant', { body });
+      return data;
+    },
+    onSuccess: () => { qc.invalidateQueries({ queryKey: ['alloc-scope'] }); qc.invalidateQueries({ queryKey: ['alloc-wallets'] }); },
   });
 }
 
@@ -108,7 +132,7 @@ export function useSetMonthlyGrant() {
   });
 }
 
-export interface ScopeWallet { wallet_id: string; balance: string; monthly_grant?: string; scope: 'org' | 'group' | 'user'; name: string }
+export interface ScopeWallet { wallet_id: string; owner_id?: string; balance: string; monthly_grant?: string; scope: 'org' | 'group' | 'user'; name: string }
 export interface SystemTotal { wallet_id: string; balance: string; monthly_total: string; org_grant_sum: string; remaining: string }
 export interface AllocationScope { pools: ScopeWallet[]; children: Record<string, ScopeWallet[]>; system?: SystemTotal | null }
 
@@ -121,5 +145,32 @@ export function useAllocationScope() {
       const { data } = await raw.GET('/api/v1/credits/allocation-scope');
       return (data as AllocationScope) ?? { pools: [], children: {}, system: null };
     },
+  });
+}
+
+
+// GET/PUT /credits/refill-schedule — when the monthly refill fires (5-8).
+export function useRefillSchedule() {
+  return useQuery({
+    queryKey: ['refill-schedule'],
+    queryFn: async () => {
+      const { data } = await (api as unknown as { GET: (p: string) => Promise<{ data?: unknown }> })
+        .GET('/api/v1/credits/refill-schedule');
+      return data as { day: number; hour: number; tz: string; next_at?: string };
+    },
+  });
+}
+
+export function useSetRefillSchedule() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: async (body: { day: number; hour: number }) => {
+      const { data, error } = await (api as unknown as {
+        PUT: (p: string, o?: { body?: unknown }) => Promise<{ data?: unknown; error?: unknown }>;
+      }).PUT('/api/v1/credits/refill-schedule', { body });
+      if (error) throw error;
+      return data;
+    },
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['refill-schedule'] }),
   });
 }

@@ -1,0 +1,99 @@
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.15.0
+  name: gpumodechanges.gshare.io
+spec:
+  group: gshare.io
+  names:
+    kind: GpuModeChange
+    listKind: GpuModeChangeList
+    plural: gpumodechanges
+    singular: gpumodechange
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .spec.nodeName
+      name: Node
+      type: string
+    - jsonPath: .spec.gpuUuid
+      name: GPU
+      type: string
+    - jsonPath: .spec.targetMode
+      name: Target
+      type: string
+    - jsonPath: .status.phase
+      name: Phase
+      type: string
+    name: v1
+    schema:
+      openAPIV3Schema:
+        description: GpuModeChange is the Schema for the gpumodechanges API.
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: GpuModeChangeSpec describes the requested card-mode transition.
+            properties:
+              gpuIndex:
+                description: |-
+                  GpuIndex is the card's index on the node (nvidia-smi -i target). The agent cross-checks it
+                  against GpuUuid before acting.
+                minimum: 0
+                type: integer
+              gpuUuid:
+                description: GpuUuid is the physical card (GPU-... UUID, as reported
+                  by HAMi's register annotation).
+                type: string
+              nodeName:
+                description: NodeName is the Kubernetes node holding the card.
+                type: string
+              targetMode:
+                description: TargetMode is the HAMi backend to switch to.
+                enum:
+                - mig
+                - hami-core
+                type: string
+            required:
+            - gpuIndex
+            - gpuUuid
+            - nodeName
+            - targetMode
+            type: object
+          status:
+            description: GpuModeChangeStatus reports the transition's progress.
+            properties:
+              jobRef:
+                description: JobRef is the namespace/name of the agent Job executing
+                  the change.
+                type: string
+              message:
+                description: Message carries the failure detail (agent log tail) on
+                  Failed.
+                type: string
+              phase:
+                description: 'Phase: Pending -> Running -> Succeeded | Failed.'
+                type: string
+            type: object
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}

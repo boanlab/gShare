@@ -1,10 +1,11 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { api } from '@/api/client';
 
-// POST and DELETE under /storage/volumes use the loose accessor.
+// POST, PATCH, and DELETE under /storage/volumes use the loose accessor.
 const raw = api as unknown as {
   GET: (p: string, o?: { params?: { path?: Record<string, string>; query?: Record<string, unknown> } }) => Promise<{ data?: unknown }>;
   POST: (p: string, o?: { body?: unknown; params?: { path?: Record<string, string> } }) => Promise<{ data?: unknown }>;
+  PATCH: (p: string, o?: { body?: unknown; params?: { path?: Record<string, string> } }) => Promise<{ data?: unknown }>;
   DELETE: (p: string, o?: { params?: { path?: Record<string, string>; query?: Record<string, unknown> } }) => Promise<{ data?: unknown }>;
 };
 
@@ -18,10 +19,35 @@ function unwrap(d: unknown): Array<Record<string, unknown>> {
 export function useVolumes() {
   return useQuery({
     queryKey: ['volumes'],
+    refetchOnMount: 'always',
     queryFn: async () => {
       const { data } = await api.GET('/api/v1/storage/volumes');
       return (data ?? []) as Array<Record<string, unknown>>;
     },
+  });
+}
+
+// Fleet-wide listing for the admin volume page (?all=true, super_admin only).
+export function useAllVolumes() {
+  return useQuery({
+    queryKey: ['volumes', 'all'],
+    queryFn: async () => {
+      const { data } = await raw.GET('/api/v1/storage/volumes', { params: { query: { all: true, size: 100 } } });
+      return (data ?? []) as Array<Record<string, unknown>>;
+    },
+  });
+}
+
+// Leaving a share: a recipient removes their own permission row — the volume itself survives.
+export function useLeaveShare() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: async ({ volumeId, userId }: { volumeId: string; userId: string }) => {
+      await raw.DELETE('/api/v1/storage/volumes/{volume_id}/permissions/{user_id}', {
+        params: { path: { volume_id: volumeId, user_id: userId } },
+      });
+    },
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['volumes'] }),
   });
 }
 
@@ -34,7 +60,7 @@ export interface CreateVolumeBody {
   quota_gb: number;
 }
 
-// GET /storage/volumes/{id} — one volume, for deep links from the sharing, expansion, and snapshot
+// GET /storage/volumes/{id} — one volume, for deep links from the sharing and expansion
 // pages.
 export function useVolume(id?: string) {
   return useQuery({
@@ -69,18 +95,6 @@ export function useStorageQuotaUsage(scope: 'user' | 'group', scopeId: string | 
   });
 }
 
-// GET /storage/volumes/pricing — the storage rate in credits per GB-hour, shown as an estimate on
-// the new-volume form.
-export function useVolumePricing() {
-  return useQuery({
-    queryKey: ['volume-pricing'],
-    staleTime: 5 * 60_000,
-    queryFn: async () => {
-      const { data } = await raw.GET('/api/v1/storage/volumes/pricing');
-      return (data as { credit_per_gb_hour?: number }) ?? { credit_per_gb_hour: 0 };
-    },
-  });
-}
 
 // POST /storage/volumes — create a volume.
 export function useCreateVolume() {
@@ -137,54 +151,17 @@ export function useRevokePermission(volumeId: string) {
   });
 }
 
-// ── Expansion (quota requests) ──
-export function useCreateQuotaRequest(volumeId: string) {
+// ── Quota (self-service, both directions) ──
+// PATCH /storage/volumes/{id} — the server bounds it below by what is in use and above by the
+// scope's storage policy; a shrink lowers the charge only for capacity actually given back.
+export function useUpdateVolumeQuota(volumeId: string) {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: async (requested_gb: number) => {
-      const { data } = await raw.POST('/api/v1/storage/volumes/{volume_id}/quota-requests', { params: { path: { volume_id: volumeId } }, body: { requested_gb } });
+    mutationFn: async (quota_gb: number) => {
+      const { data } = await raw.PATCH('/api/v1/storage/volumes/{volume_id}', { params: { path: { volume_id: volumeId } }, body: { quota_gb } });
       return data;
     },
     onSuccess: () => qc.invalidateQueries({ queryKey: ['volumes'] }),
   });
 }
 
-// ── Snapshots ──
-export function useSnapshots(volumeId: string | null) {
-  return useQuery({
-    queryKey: ['volume-snaps', volumeId],
-    enabled: !!volumeId,
-    refetchInterval: 5000,
-    queryFn: async () => {
-      const { data } = await raw.GET('/api/v1/storage/volumes/{volume_id}/snapshots', { params: { path: { volume_id: volumeId as string } } });
-      return unwrap(data);
-    },
-  });
-}
-export function useCreateSnapshot(volumeId: string) {
-  const qc = useQueryClient();
-  return useMutation({
-    mutationFn: async () => {
-      const { data } = await raw.POST('/api/v1/storage/volumes/{volume_id}/snapshots', { params: { path: { volume_id: volumeId } } });
-      return data;
-    },
-    onSuccess: () => qc.invalidateQueries({ queryKey: ['volume-snaps', volumeId] }),
-  });
-}
-export function useRestoreSnapshot(volumeId: string) {
-  return useMutation({
-    mutationFn: async (snapshotId: string) => {
-      const { data } = await raw.POST('/api/v1/storage/volumes/{volume_id}/snapshots/{snapshot_id}/restore', { params: { path: { volume_id: volumeId, snapshot_id: snapshotId } } });
-      return data;
-    },
-  });
-}
-export function useDeleteSnapshot(volumeId: string) {
-  const qc = useQueryClient();
-  return useMutation({
-    mutationFn: async (snapshotId: string) => {
-      await raw.DELETE('/api/v1/storage/volumes/{volume_id}/snapshots/{snapshot_id}', { params: { path: { volume_id: volumeId, snapshot_id: snapshotId } } });
-    },
-    onSuccess: () => qc.invalidateQueries({ queryKey: ['volume-snaps', volumeId] }),
-  });
-}

@@ -70,7 +70,13 @@ async def list_presets(
     total = await db.scalar(select(func.count()).select_from(base.subquery()))
     rows = (
         await db.scalars(
-            base.order_by(nulls_last(ResourcePreset.gpu_frac.desc()), ResourcePreset.name.asc())
+            # GPU presets big→small by fraction; compute presets small→big by cpu (S, M, L, XL —
+            # a name sort would put XL last alphabetically but L before M and S).
+            base.order_by(
+                nulls_last(ResourcePreset.gpu_frac.desc()),
+                nulls_last(ResourcePreset.cpu.asc()),
+                ResourcePreset.name.asc(),
+            )
             .limit(page.size)
             .offset(page.offset)
         )

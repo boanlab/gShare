@@ -21,6 +21,14 @@ describe('tierVram', () => {
   it('guarantees at least 512 MB, however small the fraction', () => {
     expect(tierVram(1 / 1000, REF, 'fractional')).toBe(512);
   });
+  it('snaps DOWN so tiers tile a real card that reports under its nominal capacity', () => {
+    const REAL = 48935; // what a "48 GB" card actually reports
+    const half = tierVram(1 / 2, REAL, 'fractional');
+    expect(half).toBe(24064);
+    expect(half * 2).toBeLessThanOrEqual(REAL); // two halves must fit on one card
+    const quarter = tierVram(1 / 4, REAL, 'fractional');
+    expect(quarter * 4).toBeLessThanOrEqual(REAL);
+  });
 });
 
 describe('tierCores', () => {

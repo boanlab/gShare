@@ -8,11 +8,14 @@ from ulid import ULID
 
 # Canonical entity prefixes. Extend as needed.
 PREFIXES = {
+    "ireply": "irp",
+    "inquiry": "inq",
+    "notice": "ntc",
     "user": "usr", "org": "org", "group": "grp", "membership": "mbr",
     "wallet": "wal", "transaction": "txn", "topup": "top",
     "offering": "off", "preset": "pst", "policy": "pol", "image": "img", "build": "bld",
     "session": "ses", "allocation": "alc", "queue": "que",
-    "cluster": "clu", "node": "nod", "device": "dev", "pool": "npl",
+    "cluster": "clu", "node": "nod", "device": "dev", "pool": "npl", "pool_grant": "pgr",
     "volume": "vol", "folder": "fld", "snapshot": "snp", "permission": "vpm",
     "budget": "bdg", "alert": "alr",
     "notification": "ntf", "connection": "cnx",
@@ -20,6 +23,8 @@ PREFIXES = {
     "healthevent": "nhe", "maintenance": "mnt", "checkpoint": "ckp",
     "quotarequest": "qrq",
     "allocrequest": "car",
+    "sessionevent": "sev",
+    "resourcerequest": "rrq",
 }
 
 

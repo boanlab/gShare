@@ -9,22 +9,27 @@ import { SessionDetail } from '@/features/session/SessionDetail';
 import { ConnectPage } from '@/features/session/ConnectModal';
 import { SessionWizard } from '@/features/session/SessionWizard';
 import { QueuePage } from '@/features/queue/QueuePage';
-import { VolumePage, NewVolumePage, VolumeSharePage, VolumeQuotaPage, VolumeSnapshotsPage } from '@/features/volume/VolumePage';
+import { VolumePage } from '@/features/volume/VolumePage';
 import { WalletPage, CreditRequestPage } from '@/features/wallet/WalletPage';
 import { AccountPage } from '@/features/account/AccountPage';
+import { NoticesPage, InquiriesPage, AdminNoticesPage, AdminInquiriesPage } from '@/features/boards/Boards';
 import { PasswordPage } from '@/features/account/PasswordPage';
 
 import { AdminDashboard } from '@/features/admin/Dashboard';
-import { AdminOrgs, NewOrgPage, EditOrgPage, OrgAdminsPage } from '@/features/admin/Orgs';
-import { AdminUsers, EditUserPage, NewUserPage, DeleteUserPage } from '@/features/admin/Users';
-import { AdminGroups, NewGroupPage, EditGroupPage, GroupAdminsPage, DeleteGroupPage } from '@/features/admin/Groups';
-import { AdminResources, EditOfferingPage, EditPresetPage, EditPolicyPage, CreateOfferingPage, CreatePresetPage, CreatePolicyPage } from '@/features/admin/Resources';
-import { AdminClusters, EditClusterPage, NewClusterPage } from '@/features/admin/Clusters';
+import { AdminOrgs, OrgAdminsPage } from '@/features/admin/Orgs';
+import { AdminUsers, NewUserPage, DeleteUserPage } from '@/features/admin/Users';
+import { UsersBulkImportPage } from '@/features/admin/UsersBulkImport';
+import { AdminGroups, GroupAdminsPage, DeleteGroupPage } from '@/features/admin/Groups';
+import { AdminResources, AdminPolicies, EditPolicyPage, CreatePolicyPage } from '@/features/admin/Resources';
+import { AdminClusters } from '@/features/admin/Clusters';
 import { AdminNodes, DrainNodePage, NodeDevicesPage } from '@/features/admin/Nodes';
+import { AdminGpus } from '@/features/admin/Gpus';
+import { AdminMonitoring } from '@/features/admin/Monitoring';
 import { AdminMonitor, ForceTerminatePage } from '@/features/admin/Monitor';
 import { AdminAudit } from '@/features/admin/Audit';
-import { AdminImages, ImportImagePage, BuildImagePage } from '@/features/admin/Images';
+import { AdminImages } from '@/features/admin/Images';
 import { AdminCreditAllocation } from '@/features/admin/CreditAllocation';
+import { AdminVolumes } from '@/features/admin/Volumes';
 
 // Route map. The SPA is served from / (see vite.config): the user console at / and the admin
 // console at /admin.
@@ -46,10 +51,8 @@ export const router = createBrowserRouter(
         { path: 'wallet', element: <WalletPage /> },
         { path: 'wallet/request', element: <CreditRequestPage /> },
         { path: 'data', element: <VolumePage /> },
-        { path: 'data/new', element: <NewVolumePage /> },
-        { path: 'data/:volumeId/share', element: <VolumeSharePage /> },
-        { path: 'data/:volumeId/quota', element: <VolumeQuotaPage /> },
-        { path: 'data/:volumeId/snapshots', element: <VolumeSnapshotsPage /> },
+        { path: 'notices', element: <NoticesPage /> },
+        { path: 'support', element: <InquiriesPage /> },
         { path: 'account', element: <AccountPage /> },
         { path: 'account/password', element: <PasswordPage /> },
       ],
@@ -65,38 +68,34 @@ export const router = createBrowserRouter(
           children: [
             { index: true, element: <AdminDashboard /> },
             { path: 'orgs', element: <RequireRole role="super_admin"><AdminOrgs /></RequireRole> }, // organizations
-            { path: 'orgs/new', element: <RequireRole role="super_admin"><NewOrgPage /></RequireRole> },
-            { path: 'orgs/:orgId/edit', element: <RequireRole role="super_admin"><EditOrgPage /></RequireRole> },
             { path: 'orgs/:orgId/admins', element: <RequireRole role="super_admin"><OrgAdminsPage /></RequireRole> },
             { path: 'users', element: <RequireRole min="group_admin"><AdminUsers /></RequireRole> },
             { path: 'users/new', element: <RequireRole min="group_admin"><NewUserPage /></RequireRole> },
-            { path: 'users/:userId/edit', element: <RequireRole min="group_admin"><EditUserPage /></RequireRole> },
+            { path: 'users/bulk', element: <RequireRole min="group_admin"><UsersBulkImportPage /></RequireRole> },
             { path: 'users/:userId/delete', element: <RequireRole min="group_admin"><DeleteUserPage /></RequireRole> },
             { path: 'groups', element: <RequireRole min="group_admin"><AdminGroups /></RequireRole> },
-            { path: 'groups/new', element: <RequireRole min="group_admin"><NewGroupPage /></RequireRole> },
-            { path: 'groups/:groupId/edit', element: <RequireRole min="group_admin"><EditGroupPage /></RequireRole> },
             { path: 'groups/:groupId/admins', element: <RequireRole min="group_admin"><GroupAdminsPage /></RequireRole> },
             { path: 'groups/:groupId/delete', element: <RequireRole min="group_admin"><DeleteGroupPage /></RequireRole> },
             { path: 'resources', element: <RequireRole role="super_admin"><AdminResources /></RequireRole> },
-            { path: 'resources/offerings/new', element: <RequireRole role="super_admin"><CreateOfferingPage /></RequireRole> },
-            { path: 'resources/offerings/:offeringId/edit', element: <RequireRole role="super_admin"><EditOfferingPage /></RequireRole> },
-            { path: 'resources/presets/new', element: <RequireRole role="super_admin"><CreatePresetPage /></RequireRole> },
-            { path: 'resources/presets/:presetId/edit', element: <RequireRole role="super_admin"><EditPresetPage /></RequireRole> },
-            { path: 'resources/policies/new', element: <RequireRole role="super_admin"><CreatePolicyPage /></RequireRole> },
-            { path: 'resources/policies/:policyId/edit', element: <RequireRole role="super_admin"><EditPolicyPage /></RequireRole> },
+            { path: 'policies', element: <RequireRole min="group_admin"><AdminPolicies /></RequireRole> },
+            { path: 'policies/new', element: <RequireRole role="super_admin"><CreatePolicyPage /></RequireRole> },
+            { path: 'policies/:policyId/edit', element: <RequireRole role="super_admin"><EditPolicyPage /></RequireRole> },
             { path: 'clusters', element: <RequireRole role="super_admin"><AdminClusters /></RequireRole> },
-            { path: 'clusters/new', element: <RequireRole role="super_admin"><NewClusterPage /></RequireRole> },
-            { path: 'clusters/:clusterId/edit', element: <RequireRole role="super_admin"><EditClusterPage /></RequireRole> },
-            { path: 'nodes', element: <RequireRole role="super_admin"><AdminNodes /></RequireRole> },
+            // org_admin reaches this page for the node-pools tab only (pool.read); the node inventory
+            // itself is super_admin.
+            { path: 'nodes', element: <RequireRole min="org_admin"><AdminNodes /></RequireRole> },
+            { path: 'gpus', element: <RequireRole min="org_admin"><AdminGpus /></RequireRole> },
             { path: 'nodes/:nodeId/drain', element: <RequireRole role="super_admin"><DrainNodePage /></RequireRole> },
             { path: 'nodes/:nodeId/devices', element: <RequireRole role="super_admin"><NodeDevicesPage /></RequireRole> },
             { path: 'allocations', element: <AdminCreditAllocation /> }, // credit allocation and requests, group_admin and above
             { path: 'monitor', element: <AdminMonitor /> },
+            { path: 'monitoring', element: <RequireRole role="super_admin"><AdminMonitoring /></RequireRole> },
             { path: 'monitor/sessions/:sessionId/terminate', element: <ForceTerminatePage /> },
             { path: 'audit', element: <RequireRole min="group_admin"><AdminAudit /></RequireRole> },
+            { path: 'notices', element: <RequireRole min="group_admin"><AdminNoticesPage /></RequireRole> },
+            { path: 'inquiries', element: <RequireRole min="group_admin"><AdminInquiriesPage /></RequireRole> },
             { path: 'images', element: <RequireRole role="super_admin"><AdminImages /></RequireRole> },
-            { path: 'images/import', element: <RequireRole role="super_admin"><ImportImagePage /></RequireRole> },
-            { path: 'images/build', element: <RequireRole role="super_admin"><BuildImagePage /></RequireRole> },
+            { path: 'volumes', element: <RequireRole role="super_admin"><AdminVolumes /></RequireRole> },
           ],
         },
       ],

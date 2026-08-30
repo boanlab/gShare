@@ -83,11 +83,19 @@ class Handoff:
         agrees with the backend's yield decision. graceful_demote signals a yield-to-cold demotion:
         the operator toggles VRAM back, sends SIGTERM so the job writes a fresh checkpoint, and only
         then deletes the pod."""
+        from app.core.config import settings  # lazy: keep module import-light
+
+        pinned = None
+        if settings.PER_CARD_MODE and not paused:
+            # A cold resume re-reserved a card; re-assert the pin so the recreated pod binds it.
+            pinned = getattr(sess, "_pinned_gpu_uuid", None)
         await self.crd.set_paused(
             sess.cluster_id, sess.id, paused,
+            owner=sess.owner_user_id, group_id=sess.group_id,
             pause_mode=getattr(sess, "pause_mode", None),
             preemptible=getattr(sess, "preemptible", None),
             graceful_demote=graceful_demote,
+            pinned_gpu_uuid=pinned,
         )
 
 

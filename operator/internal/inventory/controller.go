@@ -45,6 +45,7 @@ type hamiDevice struct {
 	DevCore int    `json:"devcore"` // total cores, as a percentage
 	Type    string `json:"type"`    // GPU model
 	Health  bool   `json:"health"`
+	Mode    string `json:"mode"` // HAMi's PER-CARD sharing backend: "hami-core" or "mig"
 }
 
 // nodeGPUMode reads the device mode from the gshare.io/gpu-mode node pool label, falling back to def.
@@ -107,10 +108,22 @@ func (r *InventoryReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 	// Lossless pause prerequisite: a node is capable only when both the CRIU and cuda-checkpoint
 	// labels read "ready".
 	losslessCapable := node.Labels[labelCRIU] == "ready" && node.Labels[labelCudaCheckpoint] == "ready"
+	// Role for the console's node list: control-plane and storage from their labels, GPU when the
+	// node carries devices (or is pool-labelled for them), plain CPU worker otherwise.
+	role := "cpu"
+	if _, cp := node.Labels["node-role.kubernetes.io/control-plane"]; cp {
+		role = "master"
+	} else if _, m := node.Labels["node-role.kubernetes.io/master"]; m {
+		role = "master"
+	} else if node.Labels["gshare.io/role"] == "storage" {
+		role = "storage"
+	} else if len(devs) > 0 || node.Labels[labelGPUMode] != "" {
+		role = "gpu"
+	}
 	// Report capacity for every node, GPU-less ones included, independently of the device loop.
 	_ = r.SoT.UpsertNode(ctx, sot.Node{
 		NodeID: node.Name, NodeCPU: nodeCPU, NodeMemGB: nodeMemGB, NodeDiskGB: nodeDiskGB,
-		LosslessCapable: losslessCapable,
+		LosslessCapable: losslessCapable, Role: role,
 	})
 	for _, d := range devs {
 		_ = r.SoT.UpsertGpuDevice(ctx, sot.GpuDevice{
@@ -208,7 +221,7 @@ func devicesFromHAMi(node *corev1.Node) []Device {
 	if err := json.Unmarshal([]byte(raw), &entries); err != nil {
 		return nil
 	}
-	mode := nodeGPUMode(node, "fractional") // fractional when the label is absent
+	fallback := nodeGPUMode(node, "fractional") // node label, for entries with no per-card mode
 	devs := make([]Device, 0, len(entries))
 	for _, e := range entries {
 		if e.ID == "" || e.DevMem <= 0 {
@@ -221,6 +234,13 @@ func devicesFromHAMi(node *corev1.Node) []Device {
 		model := e.Type
 		if model == "" {
 			model = node.Labels[labelProduct]
+		}
+		// Per-CARD mode from HAMi's own register annotation: "mig" is a card-level fact; a
+		// "hami-core" card cannot distinguish fractional from exclusive (that is GShare policy,
+		// carried by the ledger's desired_mode), so it maps to the node-label fallback.
+		mode := fallback
+		if e.Mode == "mig" {
+			mode = "mig"
 		}
 		devs = append(devs, Device{
 			UUID:       e.ID,

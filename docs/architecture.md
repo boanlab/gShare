@@ -56,8 +56,9 @@ about money and state are made only in the control plane.
   fraction tier (XL ½, L ¼, M ⅛, S 1/16, SS 1/32) or an exclusive full card. VRAM and
   core limits are derived by applying the tier fraction to the offering's full-card VRAM.
 - **Session** — an interactive working environment, backed by a pod. Its mode is either
-  **fractional** (a share of VRAM and cores) or **exclusive** (the whole card). MIG is not
-  supported.
+  **fractional** (a share of VRAM and cores) or **exclusive** (the whole card). MIG is a
+  per-card pool, not a session mode: profile-aligned fractional requests may land on a MIG
+  instance transparently.
 - **Occupancy** — `max(VRAM fraction, core fraction)`. Billing is
   `rate × occupancy × runtime`; an exclusive session has occupancy 1.0.
 - **Credits, wallets, budgets** — credits are allocated down a hierarchy of wallets

@@ -2,7 +2,7 @@
 # the three GShare connection tools and SciPy.
 # Catalog entry: name="PyTorch 2.6 · CUDA 12.4 (GPU)", tag=pytorch2.6-cuda12.4-cudnn9
 # Build context: build/images, so session-base/entrypoint.sh can be shared.
-FROM codercom/code-server:4.135.0 AS cs
+FROM codercom/code-server:4.137.0 AS cs
 
 FROM pytorch/pytorch:2.7.1-cuda12.8-cudnn9-runtime
 ARG TTYD_VERSION=1.7.7

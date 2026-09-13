@@ -9,7 +9,7 @@
 # and runs as non-root (uid 1000), which satisfies restricted Pod Security.
 # Catalog entry: name="Ubuntu 22.04", tag=ml-ubuntu22.04
 # Build context: build/images, so session-base/entrypoint.sh can be shared.
-FROM codercom/code-server:4.135.0 AS cs
+FROM codercom/code-server:4.137.0 AS cs
 
 FROM ubuntu:22.04
 ARG TTYD_VERSION=1.7.7

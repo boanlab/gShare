@@ -3,7 +3,7 @@
 # PyTorch or TensorFlow themselves if they want one.
 # Catalog entry: name="Python ML · CUDA 12.4 · cuDNN 9 (GPU)", tag=ml-cuda12.4-cudnn9-gpu
 # Build context: build/images, so session-base/entrypoint.sh can be shared.
-FROM codercom/code-server:4.135.0 AS cs
+FROM codercom/code-server:4.137.0-39 AS cs
 
 FROM nvidia/cuda:12.4.1-cudnn-runtime-ubuntu22.04
 ARG TTYD_VERSION=1.7.7

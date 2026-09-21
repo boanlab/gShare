@@ -2,7 +2,7 @@
 # pair, plus the three GShare connection tools and SciPy.
 # Catalog entry: name="TensorFlow 2.18 (GPU)", tag=tensorflow2.18-gpu
 # Build context: build/images, so session-base/entrypoint.sh can be shared.
-FROM codercom/code-server:4.135.0 AS cs
+FROM codercom/code-server:4.137.0-39 AS cs
 
 FROM tensorflow/tensorflow:2.18.0-gpu
 ARG TTYD_VERSION=1.7.7

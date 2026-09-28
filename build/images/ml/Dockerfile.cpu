@@ -3,7 +3,7 @@
 # and runs as non-root (uid 1000), which satisfies restricted Pod Security.
 # Catalog entry: name="Python ML (CPU · Ubuntu 24.04)", tag=ubuntu24.04-cpu-ml
 # Build context: build/images, so session-base/entrypoint.sh can be shared.
-FROM codercom/code-server:4.135.0 AS cs
+FROM codercom/code-server:4.138.0-39 AS cs
 
 FROM ubuntu:24.04
 ARG TTYD_VERSION=1.7.7

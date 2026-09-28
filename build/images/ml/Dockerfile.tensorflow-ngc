@@ -2,7 +2,7 @@
 # plus the three GShare connection tools. Hub's tensorflow/tensorflow images ship an older CUDA and
 # do not run on RTX PRO 5000/6000. Catalog entry: cuda_version=12.8.
 # Build context: build/images, so session-base/entrypoint.sh can be shared.
-FROM codercom/code-server:4.135.0 AS cs
+FROM codercom/code-server:4.138.0-39 AS cs
 
 FROM nvcr.io/nvidia/tensorflow:25.02-tf2-py3
 ARG TTYD_VERSION=1.7.7

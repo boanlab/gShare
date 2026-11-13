@@ -182,6 +182,10 @@ func (r *HealthReconciler) cordon(ctx context.Context, n *corev1.Node) error {
 // SetupWithManager registers the controller.
 func (r *HealthReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
+		// LOCAL PATCH: the inventory reconciler also watches Node, and controller-runtime derives
+		// the controller name from the watched kind — two controllers both called "node" make
+		// manager setup fail and the operator exit 1. Name this one explicitly.
+		Named("node-health").
 		For(&corev1.Node{}).
 		Complete(r)
 }

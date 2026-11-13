@@ -11,6 +11,11 @@ metadata:
     {{- include "gshare.labels" . | nindent 4 }}
 spec:
   accessModes: ["ReadWriteOnce"]
+  {{- /* Put the dumps on a different node than the database: with local-path both land on the
+         control-plane node's disk and a single disk failure takes the data and its backup. */}}
+  {{- with .Values.postgres.backup.storageClass }}
+  storageClassName: {{ . | quote }}
+  {{- end }}
   resources:
     requests:
       storage: {{ .Values.postgres.backup.storage }}

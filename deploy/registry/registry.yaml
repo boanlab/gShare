@@ -45,6 +45,9 @@ spec:
     metadata: { labels: { app: registry } }
     spec:
       nodeSelector: { gshare.io/role: storage }
+      # The label step taints the storage node gshare.io/role=storage:NoSchedule; without this the
+      # pods are pinned to a node they may not schedule on.
+      tolerations: [{ key: gshare.io/role, operator: Equal, value: storage, effect: NoSchedule }]
       containers:
         - name: registry
           image: registry:2.8.3
@@ -67,6 +70,9 @@ spec:
     metadata: { labels: { app: mirror } }
     spec:
       nodeSelector: { gshare.io/role: storage }
+      # The label step taints the storage node gshare.io/role=storage:NoSchedule; without this the
+      # pods are pinned to a node they may not schedule on.
+      tolerations: [{ key: gshare.io/role, operator: Equal, value: storage, effect: NoSchedule }]
       containers:
         - name: mirror
           image: registry:2.8.3
